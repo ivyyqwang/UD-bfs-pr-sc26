@@ -1,0 +1,350 @@
+// This is all metadata information
+#include "v1v2intersection.udwh"
+#include "main_master.udwh"
+#include "master_launchers.udwh"
+#include "flag.udwh"
+#include "common.udwh"
+
+
+// #define DEBUG
+
+
+thread intersection_launcher{
+    long num_threads_total;
+    long num_threads_active;
+    long* int_dram_tail_ptr;
+    long* int_dram_head_ptr;
+    long num_outstanding;
+    long* local lmbuff;
+	unsigned long half_intersection_len;
+
+	/* ------------------ Initilization ------------------- */
+    event intersection_init(long num_intersections_per_lane, long* intersection_addr, long intersection_size){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] Intersection launcher num_intersections:%lu int_size:%lu ", NETID, num_intersections_per_lane, intersection_size);
+#endif
+		// return to master launcher
+		send_event(CCONT, num_intersections_per_lane, IGNRCONT);
+
+        lmbuff = LMBASE + WORKER_THREADID_OFFSET;
+        lmbuff[0] = TID;
+
+        lmbuff = LMBASE + (INT_LAUNCHER << 3);
+        lmbuff[ALL_LAUNCHED] = 0;
+        lmbuff[MAINCONT] = CCONT;
+        unsigned long temp = intersection_addr;
+        lmbuff[DRAM_START] = temp;
+        temp = intersection_addr + intersection_size;
+        lmbuff[DRAM_END] = temp;
+        int_dram_tail_ptr = intersection_addr;
+        int_dram_head_ptr = intersection_addr;
+        num_outstanding = 0;
+        num_threads_total = num_intersections_per_lane;
+        num_threads_active = 0;
+
+		half_intersection_len = intersection_size >> 7;  // 4 words, 32 B (not half, now is 1/4)
+		// half_intersection_len = 0;  
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_launcher> dram_head:%lu dram_tail:%lu", NETID, int_dram_head_ptr, int_dram_tail_ptr);
+        print("[DEBUG][NWID %lu] num_outstanding:%lu", NETID, num_outstanding);
+        print("[DEBUG][NWID %lu] <intersection_launcher> will return now ", NETID);
+#endif
+        yield;
+    }
+
+    event receive(long v1, long v2, long threshold, long return_nid){
+        // check if all threads are active
+        // check for a free thread
+        // launch master 
+        // else save in dram 
+        // update pointers (check for roll over)
+        //  vertex_master --> event launch (long lm_offset, long* g_v, long v1){
+        //print("[DEBUG][NWID %lu] <intersection_receive> received (%lu, %lu)", NETID, v1, v2);
+		// if(return_nid == 47){
+		// 	print("[DEBUG][NWID %lu] <intersection_receive> received (%lu, %lu, %lu)", NETID, v1, v2, threshold);
+		// }
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_receive> received (%lu, %lu, %lu)", NETID, v1, v2, threshold);
+        print("[DEBUG][NWID %lu] <intersection_receive> num_outstanding:%lu", NETID, num_outstanding);
+#endif
+        if(num_threads_active < num_threads_total){
+            long tmp = evw_new(NETID, v1v2intersection__launch);
+            long* local temp_lmbuff = LMBASE;
+            unsigned long gv = temp_lmbuff[G_V];
+            temp_lmbuff = LMBASE + (SENDBUFFER << 3);
+            temp_lmbuff[0] = 0;
+            temp_lmbuff[1] = gv;
+            // temp_lmbuff[2] = v1;
+            // temp_lmbuff[3] = v2;
+            // temp_lmbuff[4] = threshold;
+            // temp_lmbuff[5] = return_nid;
+			copyOperands(v1, temp_lmbuff + 16, 4);
+
+#ifdef DEBUG
+            print("[DEBUG][NWID %lu] <intersetion_receive> launch operands gv:%lu v1:%lu v2:%lu threshold:%lu", NETID, gv, v1, v2, threshold);
+#endif
+            send_event(tmp, temp_lmbuff, 6, intersection_term);
+            num_threads_active = num_threads_active + 1;
+            yield;
+
+        }else{
+            // no thread active save in memory
+
+#ifdef DEBUG
+       	 	print("[DEBUG][NWID %lu] <intersection_receive> buffer in dram:%lu", NETID, int_dram_tail_ptr);
+#endif
+
+			if( (num_outstanding > 0) && (int_dram_head_ptr == int_dram_tail_ptr) )
+			{
+				print("[DEBUG][NWID %lu] buffer is full", NETID);
+				long* local temp_lmbuff = LMBASE + (SENDBUFFER << 3);
+				temp_lmbuff[0] = v1;
+				temp_lmbuff[1] = v2;
+				temp_lmbuff[2] = threshold;
+				temp_lmbuff[3] = return_nid;
+				send_event(CEVNT, temp_lmbuff, 4, CCONT);
+				yield;
+			}
+			num_outstanding = num_outstanding + 1;
+			//     print("[DEBUG][NWID %lu] <intersection_receive> buffer in dram:%lu (%lu,%lu), num_outstanding: %lu", NETID, int_dram_tail_ptr, dram_start, dram_end, num_outstanding);
+				
+				
+			long* local temp_lmbuff = LMBASE + (SENDBUFFER << 3);
+			temp_lmbuff[0] = v1;
+			temp_lmbuff[1] = v2;
+			temp_lmbuff[2] = threshold + 1;
+			temp_lmbuff[3] = return_nid;
+			send_dram_write(int_dram_tail_ptr, temp_lmbuff, 4, v1v2_write_return);
+			int_dram_tail_ptr = int_dram_tail_ptr + 32;
+            
+			unsigned long dram_end = lmbuff[DRAM_END];	
+			if(int_dram_tail_ptr >= dram_end){
+				unsigned long dram_start = lmbuff[DRAM_START];
+				int_dram_tail_ptr = dram_start;
+			}
+
+			if(num_outstanding > half_intersection_len){
+				temp_lmbuff = LMBASE;
+				temp_lmbuff[NUM_V_THREAD] = 0;
+			}
+#ifdef DEBUG
+			print("[DEBUG][NWID %lu] <intersection_receive> dram_head:%lu dram_tail:%lu", NETID, int_dram_head_ptr, int_dram_tail_ptr);
+			print("[DEBUG][NWID %lu] <intersection_receive> num_threads_total:%lu thread_active:%lu", NETID, num_threads_total, num_threads_active);
+			print("[DEBUG][NWID %lu] <intersection_receive> num_outstanding:%lu", NETID, num_outstanding);
+#endif
+            yield;
+        }
+    }
+    event receive_from_dram(long v1, long v2, long threshold, long return_nid, long * addr){
+        if(threshold == 0){
+            send_dram_read(addr, 4, receive_from_dram);
+            yield;
+        }
+        // print("[DEBUG][NWID %lu] addr 0x%lx", NETID, addr);
+        long* local temp_lmbuff = LMBASE + (SENDBUFFER * 8);
+        temp_lmbuff[0] = 0;
+        temp_lmbuff[1] = 0;
+        temp_lmbuff[2] = 0;
+        temp_lmbuff[3] = 0;
+        send_dram_write(addr, temp_lmbuff, 4, v1v2_write_return);
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <receive_from_dram> received (%lu, %lu, %lu)", NETID, v1, v2, threshold-1);
+        print("[DEBUG][NWID %lu] <receive_from_dram> num_outstanding:%lu", NETID, num_outstanding);
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 1 '[NWID %lu] int_worker_start_1' X0 " };
+#endif
+        // if(return_nid == 47){
+		// 	print("[DEBUG][NWID %lu] <intersection_receive_dram> received (%lu, %lu, %lu)", NETID, v1, v2, threshold);
+		// }
+        if(num_threads_active < num_threads_total){
+            long tmp = evw_new(NETID, v1v2intersection__launch);
+            temp_lmbuff = LMBASE;
+            unsigned long gv = temp_lmbuff[G_V];
+			
+            temp_lmbuff = LMBASE + (SENDBUFFER << 3);
+            temp_lmbuff[0] = 0;
+            temp_lmbuff[1] = gv;
+            temp_lmbuff[2] = v1;
+            temp_lmbuff[3] = v2;
+            temp_lmbuff[4] = threshold-1;
+            temp_lmbuff[5] = return_nid;
+#ifdef DEBUG
+            print("[DEBUG][NWID %lu] <intersetion_receive> launch operands gv:%lu v1:%lu v2:%lu threshold:%lu", NETID, gv, v1, v2, threshold-1);
+#endif
+            send_event(tmp, temp_lmbuff, 6, intersection_term);
+            num_threads_active = num_threads_active + 1;
+#ifdef DETAIL_PERF
+        asm {"perflog 1 1 '[NWID %lu] int_worker_end_1' X0 " };
+#endif
+            yield;
+        }else{
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_receive> buffer in dram:%lu", NETID, int_dram_tail_ptr);
+#endif
+
+        	if( (num_outstanding > 0) && (int_dram_head_ptr == int_dram_tail_ptr) )
+            {
+                print("[DEBUG][NWID %lu] buffer2 is full", NETID);
+                temp_lmbuff = LMBASE;
+                temp_lmbuff = LMBASE + (SENDBUFFER << 3);
+                temp_lmbuff[0] = v1;
+                temp_lmbuff[1] = v2;
+                temp_lmbuff[2] = threshold - 1;
+                temp_lmbuff[3] = return_nid;
+				unsigned long evword = evw_update_event(CEVNT, receive);
+                send_event(evword, temp_lmbuff, 4, CCONT);
+                yield;
+            }
+
+            num_outstanding = num_outstanding + 1;
+            //     print("[DEBUG][NWID %lu] <intersection_receive> buffer in dram:%lu (%lu,%lu), num_outstanding: %lu", NETID, int_dram_tail_ptr, dram_start, dram_end, num_outstanding);
+            
+            
+            temp_lmbuff = LMBASE + (SENDBUFFER * 8);
+            temp_lmbuff[0] = v1;
+            temp_lmbuff[1] = v2;
+            temp_lmbuff[2] = threshold;
+            temp_lmbuff[3] = return_nid;
+            send_dram_write(int_dram_tail_ptr, temp_lmbuff, 4, v1v2_write_return);
+            int_dram_tail_ptr = int_dram_tail_ptr + 32;
+            unsigned long dram_end = lmbuff[DRAM_END];
+            if(int_dram_tail_ptr >= dram_end){
+				unsigned long dram_start = lmbuff[DRAM_START];
+                int_dram_tail_ptr = dram_start;
+            }
+			if(num_outstanding > half_intersection_len){
+				temp_lmbuff = LMBASE;
+				temp_lmbuff[NUM_V_THREAD] = 0;
+			}
+#ifdef DEBUG
+			print("[DEBUG][NWID %lu] <intersection_receive> dram_head:%lu dram_tail:%lu", NETID, int_dram_head_ptr, int_dram_tail_ptr);
+			print("[DEBUG][NWID %lu] <intersection_receive> num_threads_total:%lu thread_active:%lu", NETID, num_threads_total, num_threads_active);
+			print("[DEBUG][NWID %lu] <intersection_receive> num_outstanding:%lu", NETID, num_outstanding);
+#endif
+            yield;
+        }
+    }
+
+
+    event intersection_term(long return_nid, long tc){
+        // intersection thread terminated
+        // put the offset in a thread that has status == -1
+        // and then check if there are things to be launched and read from dram if there are
+        // If everything has been launched - check if num_threads_active == 0
+
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_term> num_outstanding:%lu", NETID, num_outstanding);
+#endif
+        num_threads_active = num_threads_active - 1;
+
+        unsigned long evword = evw_update_event(CEVNT, master_launcher__reduce_num_int);
+        int nid = return_nid;
+        unsigned long cont_evword = evw_update_netid(evword, nid);
+        evword = evw_new(nid, master_launcher__send_to_master_thread1);
+        send_event(evword, cont_evword, tc, IGNRCONT);
+
+		// if(return_nid == 47){
+		// 	print("[DEBUG][NWID %lu] <intersection_term>", NETID);
+		// }
+
+
+        // Check if there's stuff in memory
+        if(num_outstanding > 0){
+            // read from head ptr
+            num_outstanding = num_outstanding - 1;
+            // send a read from memory
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_term> read from dram:%lu", NETID,int_dram_head_ptr);
+        print("[DEBUG][NWID %lu] <intersection_term> num_oustanding:%lu", NETID, num_outstanding);
+#endif
+            send_dram_read(int_dram_head_ptr, 4, receive_from_dram);
+            
+            int_dram_head_ptr = int_dram_head_ptr + 32;
+            unsigned long temp2 = int_dram_head_ptr;
+			unsigned long dram_end = lmbuff[DRAM_END];
+            if(temp2 >= dram_end){
+				unsigned long dram_start = lmbuff[DRAM_START];
+                int_dram_head_ptr = dram_start;
+            }
+			// long* local temp_lmbuff = LMBASE;
+			// temp_lmbuff[NUM_V_THREAD] = 0;
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_term> dram_head:%lu dram_tail:%lu", NETID, int_dram_head_ptr, int_dram_tail_ptr);
+        print("[DEBUG][NWID %lu] <intersection_term> num_threads_total:%lu thread_active:%lu", NETID, num_threads_total, num_threads_active);
+#endif
+        }else{
+			long* local temp_lmbuff = LMBASE + MASTER_LAUNCHER;
+			unsigned long launch = temp_lmbuff[ALL_LAUNCHED];
+			if(launch < 2){
+				temp_lmbuff = LMBASE;
+				if(temp_lmbuff[NUM_V_THREAD] == 0){
+					temp_lmbuff[NUM_V_THREAD] = NUM_MASTERS;
+					temp_lmbuff = LMBASE + MASTER_THREADID_OFFSET;
+					int tid = temp_lmbuff[0];
+					unsigned long evword0 = evw_update_event(CEVNT, master_launcher__relaunch);
+					unsigned long evword1 = evw_update_thread(evword0, tid);
+					send_event(evword1, tid, IGNRCONT);
+
+				}
+			}
+		}
+		// if(NETID == 0){
+		// 	long* local temp_lmbuff = LMBASE;
+		// 	long dram_end = temp_lmbuff[NUM_V_THREAD];
+        //     print("[DEBUG][NWID %lu] <intersection_term> test %lu %lu %lu", NETID, dram_end, num_outstanding, num_threads_active);
+        // }
+
+    }
+
+    event get_tc(){
+        lmbuff = LMBASE;
+        long tc_val = lmbuff[TOP_TC_OUTPUT];
+        #ifdef DEBUG
+        print("[DEBUG][NWID %lu] <intersection_get_tc> tc_val:%lu", NETID, tc_val);
+        #endif
+        send_event(CCONT, tc_val, IGNRCONT);
+        // finally we can terminate
+        yield_terminate;
+    }
+
+    event send_to_worker_thread2(long op0, long op1, long op2){
+        unsigned long* local tmp_lmbuff = LMBASE + WORKER_THREADID_OFFSET;
+        int tid = tmp_lmbuff[0];
+        
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread2> tid:%ld, CCONT=%lu", NETID, tid, CCONT);
+#endif
+        unsigned long evword = evw_update_thread(op0, tid);
+        send_event(evword, op1, op2, CCONT);
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread2> op1:%lu, op2=%lu", NETID, op1, op2);
+#endif
+        yield_terminate;
+    }
+
+    event send_to_worker_thread4(long op0, long op1, long op2, long op3){
+        unsigned long* local tmp_lmbuff = LMBASE + WORKER_THREADID_OFFSET;
+        int tid = tmp_lmbuff[0];
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread4> tid:%ld, CCONT=0x%lx", NETID, tid, CCONT);
+#endif
+        unsigned long evword2 = evw_update_event(CEVNT, receive);
+        unsigned long evword = evw_update_thread(evword2, tid);
+        evword = evw_update_netid(evword, NETID);
+        send_ops(evword, op0, 4, IGNRCONT);
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread4> op1:%lu, op2=%lu", NETID, op1, op2);
+#endif
+		// if(op3 == 47){
+		// 	print("[DEBUG][NWID %lu] <send_to_worker_thread4> op0:%lu, op1:%lu, op2=%lu", NETID, op0, op1, op2);
+		// }
+        yield_terminate;
+    }
+
+
+    event v1v2_write_return(){
+        yield;
+    }
+
+}

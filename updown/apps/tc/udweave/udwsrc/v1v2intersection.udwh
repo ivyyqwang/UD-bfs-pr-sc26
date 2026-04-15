@@ -1,0 +1,13 @@
+#ifndef __v1v2intersection_H__
+#define __v1v2intersection_H__
+
+
+extern event v1v2intersection__launch();
+extern event v1v2intersection__vert_return();
+extern event v1v2intersection__intersect_lists();
+extern event v1v2intersection__lista_ret_1();
+extern event v1v2intersection__listb_ret_1();
+extern event v1v2intersection__intersect_ab();
+
+
+#endif

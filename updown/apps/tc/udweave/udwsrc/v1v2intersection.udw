@@ -1,0 +1,412 @@
+#include "flag.udwh"
+#include "common.udwh"
+
+// thread offsets (total space = 41*8 = 336 bytes)
+#define TC 0
+#define MAINCONT 1
+#define FLA 2
+#define FLB 3
+#define PTRA 4
+#define PTRB 5
+#define SIZEA 6
+#define SIZEB 7
+#define CURRA 8
+#define CURRB 16
+#define V1 24
+#define V2 25
+#define THRESHOLD 26
+#define RE_NETID 27
+
+#define VERTEX_THREAD_LM_SIZE  240
+
+// #define NO_ADVANCED_STOP
+
+
+
+thread v1v2intersection {
+    long abreturn_count;
+    long offs_a;
+    long offs_b;
+    unsigned long* local lmbuff;
+	long* local alist; 
+	long* local blist; 
+	long tc;
+
+    event launch(long lmoffset, long* gv, long v1, long v2, long threshold, long re_netid){
+        // fetch v1 and v2
+        // print("Intersection v1:%lu v2:%lu threshold:%lu", v1, v2, threshold);
+        long tmp = THREAD_STATUS << 3;
+        long lm_offset = TID * VERTEX_THREAD_LM_SIZE;
+        lm_offset = lm_offset + tmp;
+
+        lmbuff = LMBASE + lm_offset;
+        // lmbuff[TC] = 0;
+		tc = 0;
+        lmbuff[MAINCONT] = CCONT;
+        lmbuff[V1] = v1;
+        lmbuff[V2] = v2;
+        lmbuff[THRESHOLD] = threshold;
+        lmbuff[FLA] = 0;
+        lmbuff[FLB] = 0;
+        lmbuff[RE_NETID] = re_netid;
+        abreturn_count = 0;
+        offs_a = 0;
+        offs_b = 0;
+        #ifdef DEBUG
+        print("threshold = %ld", threshold);
+        print("gv = %lu", gv);
+        #endif
+        long* v_addr = gv + (v1 << 6);
+		send_dram_read(v_addr, 5, vert_return);
+        v_addr = gv + (v2 << 6);
+		send_dram_read(v_addr, 5, vert_return);
+
+		alist = lmbuff + (CURRA * 8); 
+		blist = lmbuff + (CURRB * 8);
+
+        yield;
+    }
+
+    event vert_return(long op0, long op1, long op2, unsigned long min_vid, unsigned long max_vid){
+        //0 - deg, 2 - neighlistptr
+        // save nlist
+#ifdef DEBUG
+        print("vert_return %ld %ld %ld", op0, op1, op2);
+#endif
+        // if degree is 0, yield_t
+        if(op0 == 0){
+            if(abreturn_count == 0){
+                offs_a = 1;
+            }
+            else{
+                unsigned long temp = 0;
+                long cont = lmbuff[MAINCONT];
+                unsigned long temp2 = lmbuff[RE_NETID];
+        #ifdef DEBUG
+                long v1 = lmbuff[V1];
+                long v2 = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <vert_return> TC (%lu, %lu):%lu", NETID, v1, v2, temp);
+        #endif
+                send_event(cont, temp2, temp, IGNRCONT);
+        #ifdef DEBUG        
+                print("Terminate because both are size 0");
+        #endif
+                yield_terminate;
+            }
+        }
+        if(abreturn_count == 1 && offs_a == 1)
+        {
+                unsigned long temp = 0;
+                long cont = lmbuff[MAINCONT];
+                unsigned long temp2 = lmbuff[RE_NETID];
+        #ifdef DEBUG
+                long v1 = lmbuff[V1];
+                long v2 = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <vert_return> TC (%lu, %lu):%lu", NETID, v1, v2, temp);
+        #endif
+                send_event(cont, temp2, temp, IGNRCONT);
+        #ifdef DEBUG        
+                print("Terminate because both are size 0");
+        #endif
+                yield_terminate;
+        }
+        abreturn_count = abreturn_count + 1;
+        if(abreturn_count == 2){
+            if(min_vid > tc){
+                unsigned long temp = 0;
+                long cont = lmbuff[MAINCONT];
+                unsigned long temp2 = lmbuff[RE_NETID];
+                send_event(cont, temp2, temp, IGNRCONT);
+                yield_terminate;
+            }
+            if(min_vid == tc){
+                unsigned long temp = lmbuff[THRESHOLD];
+                if(min_vid < temp){
+                    temp = 1;
+                }else{
+                    temp = 0;
+                }
+                long cont = lmbuff[MAINCONT];
+                unsigned long temp2 = lmbuff[RE_NETID];
+                send_event(cont, temp2, temp, IGNRCONT);
+                yield_terminate;
+            }
+            if(max_vid < offs_b){
+                unsigned long temp = 0;
+                long cont = lmbuff[MAINCONT];
+                unsigned long temp2 = lmbuff[RE_NETID];
+                send_event(cont, temp2, temp, IGNRCONT);
+                yield_terminate;
+            }
+            if(max_vid == offs_b){
+                unsigned long temp = lmbuff[THRESHOLD];
+                if(max_vid < temp){
+                    temp = 1;
+                }else{
+                    temp = 0;
+                }
+                long cont = lmbuff[MAINCONT];
+                unsigned long temp2 = lmbuff[RE_NETID];
+                send_event(cont, temp2, temp, IGNRCONT);
+                yield_terminate;
+            }
+            lmbuff[PTRB] = op2;
+            lmbuff[SIZEB] = op0;
+            long* local int_addr = lmbuff + (PTRA << 3); 
+            long evword = evw_update_event(CEVNT, intersect_lists);
+            send_event(evword, int_addr, 4, evword);
+            offs_b = 0;
+            tc = 0;
+        }else{
+            offs_b = min_vid;
+            tc = max_vid;
+            lmbuff[PTRA] = op2;
+            lmbuff[SIZEA] = op0;
+            yield;
+        }
+        // // save neighbor ptr
+        // lmbuff[PTRA + abreturn_count] = op2;
+        // // save degree
+        // lmbuff[SIZEA + abreturn_count] = op0;
+        // abreturn_count = abreturn_count + 1;
+        // if(abreturn_count == 2){
+        //     // launch intersection
+        //     long* local int_addr = lmbuff + (PTRA << 3); 
+        //     long evword = evw_update_event(CEVNT, intersect_lists);
+        //     send_event(evword, int_addr, 4, evword);
+        // }else{
+        //     yield; 
+        // }
+    }
+
+
+// size_a, size_b, ptr_a, ptr_b, lm_offset
+// return -1 if not enough size was available  -- master should relaunch
+// size per intersection - 8 words, ptr_a, ptr_b
+    event intersect_lists (long* ptr_a, long* ptr_b, long size_a, long size_b){
+#ifdef DEBUG
+        print("inputs ptr_a:%lu, size_a:%lu, ptr_b:%lu, size_b:%lu", ptr_a, size_a, ptr_b, size_b);
+#endif
+        send_dram_read(ptr_a, 8, lista_ret_1);
+        send_dram_read(ptr_b, 8, listb_ret_1);
+        abreturn_count = 2;
+        yield;
+    }
+
+    event lista_ret_1(long op0, long op1,long op2,long op3,long op4,long op5,long op6, long op7){
+        // Update the return count
+        int num_ops = 8;
+        abreturn_count = abreturn_count - 1;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_1> num_ops:%lu ret_cnt:%lu op0:%lu", NETID, num_ops, abreturn_count, op0);
+#endif
+        // Get the num ops
+        // long* local a_addr = lmbuff + (CURRA * 8); 
+	    copyOperands(op0, alist, num_ops);
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_1> copy:%lu operands to base:%lu lm:%lu", NETID, num_ops, lmbuff, a_addr);
+#endif
+        if(abreturn_count == 0){
+            long evword = evw_update_event(CEVNT, intersect_ab);
+            send_event(evword, abreturn_count, evword);
+        }
+        yield;
+    }
+
+
+    event listb_ret_1(long op0, long op1, long op2,long op3,long op4,long op5,long op6,long op7){
+        // Update the return count
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_1> CEVNT:%lu ", NETID, CEVNT);
+#endif
+        int num_ops = 8;
+        abreturn_count = abreturn_count - 1;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_1> num_ops:%lu ret_cnt:%lu op0:%lu", NETID, num_ops, abreturn_count, op0);
+#endif
+        // Get the num ops
+        // long* local b_addr = lmbuff + (CURRB * 8);
+		copyOperands(op0, blist, num_ops);
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_1> copy:%lu operands to base:%lu lm:%lu", NETID, num_ops, lmbuff, b_addr);
+#endif
+        if(abreturn_count == 0){
+            long evword = evw_update_event(CEVNT, intersect_ab);
+            send_event(evword, abreturn_count, evword);
+        }
+        yield;
+    }
+
+
+    event intersect_ab(){
+        // long* local alist = lmbuff + (CURRA * 8); 
+        // long* local blist = lmbuff + (CURRB * 8); 
+        long loc_size_a = lmbuff[SIZEA];
+        long loc_size_b = lmbuff[SIZEB];
+        long iter_a = lmbuff[FLA];
+        long iter_b = lmbuff[FLB];
+        
+
+        long loc_tc = loc_size_a - iter_a;
+        // if rem (loc_tc) < 8 then that's all that's remaining
+        if(loc_tc > 8){
+            loc_size_a = 8;
+        }else{
+            loc_size_a = loc_tc;
+        }
+        loc_tc = loc_size_b - iter_b;
+        if(loc_tc > 8){
+            loc_size_b = 8;
+        }else{
+            loc_size_b = loc_tc;
+        }
+        loc_tc = 0;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> loc_size_a:%lu loc_size_b:%lu", NETID, loc_size_a, loc_size_b);
+#endif
+        // tmp reg iter_a = threshold, iter_b = end (0)
+        iter_a = lmbuff[THRESHOLD];
+        iter_b = 0;
+        // else walk through the two lists simultaeously
+        while((offs_a < loc_size_a) && (offs_b < loc_size_b)){
+            long elem_a = alist[offs_a];
+            long elem_b = blist[offs_b];
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> elem_a:%lu elem_b:%lu threshold:%ld", NETID, elem_a, elem_b, iter_a);
+#endif
+#ifdef NO_ADVANCED_STOP
+            if(elem_a < elem_b){
+                offs_a = offs_a + 1;
+            }
+            elif(elem_b < elem_a){
+                offs_b = offs_b + 1;
+            }
+            elif(elem_a >= iter_a){
+                offs_a = offs_a + 1;
+                offs_b = offs_b + 1;
+            }
+            elif(elem_b >= iter_a){
+                offs_a = offs_a + 1;
+                offs_b = offs_b + 1;
+            }
+            else{
+                loc_tc = loc_tc + 1;
+                offs_a = offs_a + 1;
+                offs_b = offs_b + 1;
+            }
+#else
+            if(elem_a >= iter_a){
+                iter_b = 1;
+                offs_a = loc_size_a;
+            }
+            elif(elem_b >= iter_a){
+                iter_b = 1;
+                offs_a = loc_size_a;
+            }
+            elif(elem_a < elem_b){
+                offs_a = offs_a + 1;
+            }
+            elif(elem_b < elem_a){
+                offs_b = offs_b + 1;
+            }else{
+                loc_tc = loc_tc + 1;
+                offs_a = offs_a + 1;
+                offs_b = offs_b + 1;
+            }
+#endif
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> offs_a:%lu offs_b:%lu", NETID, offs_a, offs_b);
+#endif
+        } 
+        // update the loc tc
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> loc tc updated:%lu", NETID, loc_tc);
+#endif
+        tc = tc + loc_tc; 
+
+        // if intersect result > v0 (symmetric break), end
+        if(iter_b == 1) 
+        {
+            long evword = lmbuff[MAINCONT];
+        #ifdef PRINT_intersect_result
+			iter_a = lmbuff[V1];
+            iter_b = lmbuff[V2];
+            print("[DEBUG][NWID %lu] <intersect> TC (%lu, %lu):%lu", NETID, iter_a, iter_b, tc);
+        #endif
+            // lmbuff = LMBASE;
+            // lmbuff[TOP_FLAG_OFFSET] = 1;
+
+            unsigned long re_netid = lmbuff[RE_NETID];
+            send_event(evword, re_netid, tc, IGNRCONT);
+
+            yield_terminate;
+
+        }
+
+        // one or both the lists exited --> whichever did fetch that
+        // update iter by how much ever was processed 
+        // check for bounds and fetch
+        // retain offs of the other one 
+        if(offs_a == loc_size_a){
+            unsigned long loc_size = lmbuff[SIZEA];
+			iter_a = lmbuff[FLA];
+            iter_a = iter_a + loc_size_a;
+            if(iter_a >= loc_size){
+                long evword = lmbuff[MAINCONT];
+            #ifdef PRINT_intersect_result
+				iter_a = lmbuff[V1];
+                iter_b = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <intersect> TC (%lu, %lu):%lu", NETID, iter_a, iter_b, tc);
+            #endif
+                loc_size = lmbuff[RE_NETID];
+                send_event(evword, loc_size, tc, IGNRCONT);
+#ifdef DEBUG        
+                print("Terminate since lista is done");
+#endif
+                // lmbuff = LMBASE;
+                // iter_a = 1;
+                // lmbuff[TOP_FLAG_OFFSET] = iter_a;
+                yield_terminate;
+            }
+        }
+        if(offs_b == loc_size_b){
+            iter_b = lmbuff[FLB];
+            unsigned long loc_size = lmbuff[SIZEB];
+            iter_b = iter_b + loc_size_b;
+            if(iter_b >= loc_size){
+                long evword = lmbuff[MAINCONT];
+            #ifdef PRINT_intersect_result
+				iter_a = lmbuff[V1];
+                iter_b = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <intersect> TC (%lu, %lu):%lu", NETID, iter_a, iter_b, tc);
+            #endif
+                loc_size = lmbuff[RE_NETID];
+                send_event(evword, loc_size, tc, IGNRCONT);
+#ifdef DEBUG        
+                print("Terminate since lista is done");
+#endif
+                // lmbuff = LMBASE;
+                // iter_a = 1;
+                // lmbuff[TOP_FLAG_OFFSET] = iter_a;
+                yield_terminate;
+            }
+        }
+
+        if(offs_a == loc_size_a){
+            unsigned long* local_ptr = lmbuff[PTRA];
+            local_ptr = local_ptr + (iter_a << 3);
+		    send_dram_read(local_ptr, 8, lista_ret_1);
+            lmbuff[FLA] = iter_a;
+            offs_a = 0;
+            abreturn_count = abreturn_count + 1;
+        }
+        if(offs_b == loc_size_b){
+            unsigned long* local_ptr = lmbuff[PTRB];
+            local_ptr = local_ptr + (iter_b << 3);
+		    send_dram_read(local_ptr, 8, listb_ret_1);
+            lmbuff[FLB] = iter_b;
+            offs_b = 0;
+            abreturn_count = abreturn_count + 1;
+        }
+    }
+}

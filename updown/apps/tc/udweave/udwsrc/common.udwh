@@ -1,0 +1,53 @@
+#ifndef __COMMON_H__
+#define __COMMON_H__
+
+// This is all metadata information
+#define LMSIZE 65536
+#define WORD_SIZE 8
+#define WORD_SIZE_LOG2 3
+
+// Total threads used in TC
+// #define WORKER_THREADS 120
+// #define NUM_MASTERS 8
+// #define NUM_INTERSECTORS 112
+
+#define NUM_MASTERS 10
+#define NUM_INTERSECTORS 220
+
+// Each threads in the same lane shared the following scratchpad
+#define TOP_FLAG_OFFSET 0
+#define TOP_TC_OUTPUT 1
+#define G_V 2
+#define NUM_LANES 3
+// send buffer 4 - 18 (15 words)
+#define SENDBUFFER 4
+#define NUM_V_THREAD 17
+#define NUM_INT 18
+#define NUM_LANES_TOTAL 19
+#define MASTER_LAUNCHER 20
+#define INT_LAUNCHER 24
+
+// master, intersection launcher offsets
+#define MAINCONT 0
+#define ALL_LAUNCHED 1 // 0: start; 1:finish initlization; 
+#define DRAM_START 2
+#define DRAM_END 3
+
+/* private scratchpad for each thread */
+#define THREAD_STATUS 28
+// Each thread's own private scratchpad size: [(THREAD_STATUS << 3) + TID * THREAD_LM_SIZE, (THREAD_STATUS << 3) + (TID+1) * THREAD_LM_SIZE]
+#define THREAD_LM_SIZE  240
+
+
+/* Store the control thread ID */
+#define THREADID_OFFSET 61664
+#define MASTER_THREADID_OFFSET 65504
+#define WORKER_THREADID_OFFSET 65512
+
+
+#define MAIN_MASTER_OFFSET 65520
+#define MAIN_TC 0
+#define MAIN_TOP_FLAG 1
+
+
+#endif

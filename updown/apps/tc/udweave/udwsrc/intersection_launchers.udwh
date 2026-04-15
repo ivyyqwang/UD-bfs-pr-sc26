@@ -1,0 +1,9 @@
+#ifndef __int_launchers_H__
+#define __int_launchers_H__
+
+extern event intersection_launcher__intersection_init();
+extern event intersection_launcher__get_tc();
+extern event intersection_launcher__send_to_worker_thread4();
+extern event intersection_launcher__send_to_worker_thread2();
+
+#endif

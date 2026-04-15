@@ -1,0 +1,295 @@
+// This is all metadata information
+#include "master_launchers.udwh"
+#include "intersection_launchers.udwh"
+#include "flag.udwh"
+#include "common.udwh"
+
+// #define DEBUG
+
+
+
+thread main_master {
+    unsigned long tc_cumulative;
+    unsigned long num_lanes;
+    unsigned long num_lanes_per_control;
+    unsigned long control_level;
+    unsigned long num_map;
+    unsigned long num_map_done;
+
+    /* 
+        multi-level broadcast and synchronization 
+        init_tc -> master_launcher::init -> init_done -> start
+        start -> master_launcher::launch_v -> v_launcher_done -> v_all_launched
+        v_all_launched -> master::launcher__all_launched -> int_launcher_done -> int_all_launched
+        int_all_launched -> intersection_launcher::get_tc -> tc_launcher_done
+    
+    */
+
+
+    event init_tc(long num_lanes_in, long* g_v_in, long* master_start, long master_size, long* intersection_start, long intersection_size, unsigned long log2_num_control_lane, unsigned long _control_level){
+        unsigned long* local lmbuff;
+        if(_control_level == 0){
+            print("[DEBUG] Main TC Master Start");
+            lmbuff = LMBASE + (MAIN_MASTER_OFFSET);
+            lmbuff[MAIN_TC] = 0;
+            lmbuff[MAIN_TOP_FLAG] = 0;
+            num_lanes = num_lanes_in;
+        }
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] num_lanes_in %lu master_start:0x%lx master_size %lu, %lu", NETID, num_lanes_in, master_start, master_size, _control_level);
+        print("[DEBUG][NWID %lu] num_lanes_in %lu intersection_start:0x%lx intersection_size %lu, %lu", NETID, num_lanes_in, intersection_start, intersection_size, _control_level);
+#endif
+        unsigned long num_masters = 1 << log2_num_control_lane;
+        num_lanes_per_control = num_lanes_in - 1;
+        num_lanes_per_control = (num_lanes_per_control >> log2_num_control_lane) + 1;
+
+        if(num_lanes_per_control == 1){
+            num_map = num_lanes_in;
+            lmbuff = LMBASE + (SENDBUFFER * 8);
+            lmbuff[0] = num_lanes_in;
+            lmbuff[1] = NUM_MASTERS;
+            lmbuff[2] = NUM_INTERSECTORS;
+            lmbuff[7] = g_v_in;
+            int netid = NETID;
+            long lane_end = netid + num_lanes_in;
+            while(netid < lane_end){
+                lmbuff[3] = master_start + netid * master_size + 8;
+                lmbuff[4] = master_size - 8;
+                lmbuff[5] = intersection_start + netid * intersection_size;
+                lmbuff[6] = intersection_size;
+                // print("[DEBUG][NWID %lu] send to %lu dram_head:0x%lx master_start 0x%lx, %lu", NETID, netid, lmbuff[3], master_start, _control_level);
+                long evword = evw_new(netid, master_launcher__init);
+                send_event(evword, lmbuff, 8, init_done);
+                netid = netid + 1;
+            }
+        }else{
+            num_map = num_masters;
+            lmbuff = LMBASE + (SENDBUFFER * 8);
+            lmbuff[0] = num_lanes_per_control;
+            // lmbuff[1] = g_v_in;
+            // lmbuff[2] = master_start;
+            // lmbuff[3] = master_size;
+            // lmbuff[4] = intersection_start;
+            // lmbuff[5] = intersection_size;
+            // lmbuff[6] = log2_num_control_lane;
+            copyOperands(g_v_in, lmbuff + 8, 6);
+            lmbuff[7] = _control_level + 1;
+
+            long mlane_id = NETID;
+            long lane_end = num_lanes_per_control * num_masters;
+            lane_end = lane_end + mlane_id;
+            while(mlane_id < lane_end){
+                long evword = evw_new(mlane_id, init_tc);
+                send_event(evword, lmbuff, 8, init_done);
+                // print("[DEBUG][NWID %lu] send0 to %lu num_lanes_per_control:%lu master_start 0x%lx, %lu", NETID, mlane_id, num_lanes_per_control, master_start, _control_level);
+                mlane_id = mlane_id + num_lanes_per_control;
+            }
+        }
+        tc_cumulative = 0;
+        num_map_done = 0;
+        control_level = _control_level;
+        lmbuff = LMBASE + THREADID_OFFSET;
+        unsigned long index = (control_level << 1);
+        lmbuff[index] = TID;
+        lmbuff[index+1] = CCONT;
+        // print("[DEBUG][NWID %lu] init end", NETID);
+        yield;
+    }
+
+    event init_done(long nwid){
+        num_map_done = num_map_done + 1;
+        if(num_map_done == num_map){
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, start);
+                send_event(evword, num_lanes, v_launcher_done);
+                print("[DEBUG][NWID %lu] <init_done> finsh", NETID);
+            }else{
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1) + 1;
+                unsigned long cont = lmbuff[index];
+                send_event(cont, NETID, IGNRCONT);
+            }
+        }       
+        yield;
+    }
+
+    event send_to_global_master_thread(long op0, long op1, long _control_level){
+        unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+        unsigned long index = _control_level << 1;
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_global_master_thread> index:%ld, CCONT=%lu, control_level=%lu", NETID, index, CCONT, _control_level);
+#endif
+        int tid = lmbuff[index];
+        lmbuff[index + 1] = CCONT;
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_global_master_thread> tid:%ld, CCONT=%lu, control_level=%lu", NETID, tid, CCONT, _control_level);
+#endif
+        unsigned long evword = evw_update_thread(op0, tid);
+        send_event(evword, op1, CCONT);
+        yield_terminate;
+    }
+
+    event start(long num_lanes_total){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start> start", NETID);
+#endif
+        num_lanes = num_lanes_total;
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, master_launcher__launch_v);
+            num_map_done = 0;
+#ifdef DEBUG        
+            print("[DEBUG][NWID %lu] <start> num_lanes_per_control == 1, num_map:%lu", NETID, num_map);
+#endif
+            int net_id = NETID;
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, master_launcher__send_to_master_thread1);
+                send_event(next_evword, cont_evword, num_lanes, v_launcher_done);
+                net_id = net_id + 1;
+            }
+        }else{
+#ifdef DEBUG        
+                print("[DEBUG][NWID %lu] <start> num_lanes_per_control != 1, num_map:%lu", NETID, num_map);
+#endif
+                unsigned long evword = evw_update_event(CEVNT, start);
+                int net_id = NETID;
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, num_lanes, control_level+1,  v_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+#ifdef DEBUG
+            print("[DEBUG][NWID %lu] <launch_v> end", NETID);
+#endif
+    }
+
+    event v_launcher_done(long nwid){
+        num_map_done = num_map_done + 1;
+        #ifdef DEBUG
+        print("[DEBUG][NWID %lu] <map_launcher_done> num_map_done:%lu from niwd %lu", NETID, num_map_done, nwid);
+        #endif
+        if(num_map_done == num_map){
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, v_all_launched);
+                send_event(evword, control_level, int_launcher_done);
+                print("[DEBUG][NWID %lu] <map_launcher_done> ", NETID);
+            }else{
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1);
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, cont, IGNRCONT);
+            }
+        }
+    }
+
+    event v_all_launched(){
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, master_launcher__all_launched);
+            int net_id = NETID;
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, master_launcher__send_to_master_thread1);
+                send_event(next_evword, cont_evword, NETID, int_launcher_done);
+                net_id = net_id + 1;
+            }
+        }else{
+                unsigned long evword = evw_update_event(CEVNT, v_all_launched);
+                int net_id = NETID;
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, net_id, control_level+1,  int_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+        yield;
+    }
+
+    event int_launcher_done(){
+        num_map_done = num_map_done + 1;
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, int_all_launched);
+                send_event(evword, control_level, tc_launcher_done);
+
+                print("[DEBUG][NWID %lu] <int_launcher_done>", NETID);
+            }
+            else{
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <int_launcher_done> ", NETID);
+                #endif
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1);
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, cont, IGNRCONT);
+            }
+        }
+    }
+
+    event int_all_launched(){
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, intersection_launcher__get_tc);
+            int net_id = NETID;
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, intersection_launcher__send_to_worker_thread2);
+                send_event(next_evword, cont_evword,  net_id, NETID, tc_launcher_done);
+                net_id = net_id + 1;
+
+            }
+        }else{
+                unsigned long evword = evw_update_event(CEVNT, int_all_launched);
+                int net_id = NETID;
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, control_level, control_level+1,  tc_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+        yield;
+    }
+
+
+
+    event tc_launcher_done(long op0, long netid){
+        num_map_done = num_map_done + 1;
+        tc_cumulative = tc_cumulative + op0;
+
+        unsigned long* local lmbuff = LMBASE;
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                lmbuff = LMBASE + MAIN_MASTER_OFFSET;
+                lmbuff[MAIN_TC] = tc_cumulative;
+                print("[DEBUG] <tc_return> result:%lu", tc_cumulative);
+                lmbuff[MAIN_TOP_FLAG] = 1;
+                yield_terminate;
+            }
+            else{
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <map_split_launcher_done> update_split_v:%lu", NETID, return_value);
+                #endif
+                unsigned long index = (control_level << 1);
+                lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, tc_cumulative, NETID, IGNRCONT);
+                yield_terminate;
+            }
+        }
+    }
+
+}

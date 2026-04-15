@@ -1,0 +1,7 @@
+#ifndef __vertex_master_exe_H__
+#define __vertex_master_exe_H__
+
+extern event vertex_master__launch();
+extern event vertex_master__v1_return();
+extern event vertex_master__v1_neighs();
+#endif

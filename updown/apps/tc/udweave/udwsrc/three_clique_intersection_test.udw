@@ -1,0 +1,796 @@
+// This is all metadata information
+#define TOP_FLAG_OFFSET 0
+#define TOP_TC_OUTPUT 8
+#define LMSIZE 65536
+// #define DEBUG
+//#define PERFLOG
+// #define DETAIL_PERF
+#define METASIZE 32
+#define WORD_SIZE 8
+#define WORD_SIZE_LOG2 3
+#define DRAM_BLOCK_SIZE 8
+#define SEND_BUFFER 16
+#define THREAD_STATUS 32
+#define HEAP_START 1280
+
+// thread offsets (total space = 41*8 = 336 bytes)
+#define TC 0
+#define MAINCONT 1
+#define PHASE 2
+#define FLA 3
+#define FLB 4
+#define PTRA 5
+#define PTRB 6
+#define SIZEA 7
+#define SIZEB 8
+#define CURRA 9
+#define CURRB 17
+#define LASTA 25
+#define LASTB 33
+#define V1 41
+#define V2 42
+#define THRESHOLD 43
+
+
+
+thread three_clique_intersect_constrain {
+    long abreturn_count;
+    long offs_a;
+    long offs_b;
+    // repurporse these 2
+    unsigned long* local lmbuff;
+    event init(long lm_offset, long* gv, long v1, long v2, long threshold){
+        // fetch v1 and v2
+#ifdef PERFLOG
+        asm { 
+            "perflog 1 8 '[NWID %lu] intersection (%lu, %lu) start' X0 %[vtx1] %[vtx2] " 
+        }: [vtx1] "r" (v1), [vtx2] "r" (v2);
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_0' X0 " };
+#endif
+        lmbuff = LMBASE + lm_offset;
+        lmbuff[TC] = 0;
+        lmbuff[MAINCONT] = CCONT;
+        lmbuff[PHASE] = 0;
+        lmbuff[V1] = v1;
+        lmbuff[V2] = v2;
+        lmbuff[THRESHOLD] = threshold;
+        #ifdef DEBUG
+        print("threshold = %ld", threshold);
+        #endif
+        abreturn_count = v1 * 24;
+        long* v_addr = gv + abreturn_count;
+        // long* v_addr = gv + (v1 << 6);
+	send_dram_read(v_addr, 8, vert_return);
+        abreturn_count = v2 * 24;
+        v_addr = gv + abreturn_count;
+        // v_addr = gv + (v2 << 6);
+	send_dram_read(v_addr, 8, vert_return);
+        abreturn_count = 0;
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_0' X0 " };
+#endif
+        yield;
+    }
+    event vert_return(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        //0 - deg, 2 - neighlistptr
+        // save nlist
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_1' X0 " };
+#endif
+#ifdef DEBUG
+        print("vert_return %ld %ld %ld", op0, op1, op2);
+#endif
+        lmbuff[PTRA + abreturn_count] = op2;
+        // save degree
+        lmbuff[SIZEA + abreturn_count] = op0;
+        abreturn_count = abreturn_count + 1;
+        if(abreturn_count == 2){
+            // launch intersection
+            long* local int_addr = lmbuff + (PTRA * 8); 
+            long evword = evw_update_event(CEVNT, intersect_lists);
+            send_event(evword, int_addr, 4, evword);
+        }else{
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_1' X0 " };
+#endif
+            yield; 
+        }
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_1' X0 " };
+#endif
+    }
+
+
+// size_a, size_b, ptr_a, ptr_b, lm_offset
+// return -1 if not enough size was available  -- master should relaunch
+// size per intersection - 8 words, ptr_a, ptr_b
+    event intersect_lists (long* ptr_a, long* ptr_b, long size_a, long size_b){
+#ifdef DEBUG
+        print("inputs ptr_a:%lu, size_a:%lu, ptr_b:%lu, size_b:%lu", ptr_a, size_a, ptr_b, size_b);
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_2' X0 " };
+#endif
+        //lmbuff = LMBASE + lm_offset;
+        //lmbuff[TC] = 0;
+        //// save the main continuation so we don't lose it
+        //lmbuff[MAINCONT] = CCONT;
+        //lmbuff[PHASE] = 0;
+        //tc = 0;
+        if(size_a == 0 || size_b == 0){
+            unsigned long temp = 0;
+            long cont = lmbuff[MAINCONT];
+        //     unsigned long temp2 = lmbuff - LMBASE;
+            long v1 = lmbuff[V1];
+            long v2 = lmbuff[V2];
+            #ifdef DEBUG
+            print("[DEBUG][NWID %lu] <intersect_lists> TC (%lu, %lu):%lu", NETID, v1, v2, temp);
+            #endif
+        //     send_event(cont, temp2, temp, IGNRCONT);
+#ifdef DEBUG        
+            print("Terminate because both are size 0");
+#endif
+#ifdef PERFLOG
+        asm { 
+            "perflog 1 9 '[NWID %lu] intersection (%lu, %lu) done' X0 %[vtx1] %[vtx2] " 
+        }: [vtx1] "r" (v1), [vtx2] "r" (v2);
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_2' X0 " };
+#endif
+            lmbuff = LMBASE;
+            lmbuff[TOP_FLAG_OFFSET] = 1;
+            yield_terminate;
+        }
+        // unsigned long temp = ptr_a;
+        // lmbuff[PTRA] = temp;
+        // temp = ptr_b;
+        // lmbuff[PTRB] = temp;
+        // lmbuff[SIZEA] = size_a;
+        // lmbuff[SIZEB] = size_b;
+        abreturn_count = 0;
+        // fla = 2, > 2 blocks, 1 > 1 block, 0 only 1 block 
+        long fla, flb;
+        if(size_a > 16){
+            fla = 2;  
+            abreturn_count = abreturn_count + 2;
+        }elif(size_a > 8){
+            fla = 1;
+            abreturn_count = abreturn_count + 2;
+        }else{
+            fla = 0;
+            abreturn_count = abreturn_count + 1;
+        }
+        if(size_b > 16){
+            flb = 2;  
+            abreturn_count = abreturn_count + 2;
+        }elif(size_b > 8){
+            flb = 1;
+            abreturn_count = abreturn_count + 2;
+        }else{
+            flb = 0;
+            abreturn_count = abreturn_count + 1;
+        }
+
+        // fetch first a
+        long* local_ptra = ptr_a;
+        long* local_ptrb = ptr_b;
+        // fetch first and last of a
+
+        if(fla > 0){
+	    send_dram_read(ptr_a, 8, lista_ret_1);
+            // get bytes
+            long size_a_bytes = size_a << 3; 
+            // get 64B aligned offset
+            long size_a_bytes_al = size_a_bytes >> 6;
+            size_a_bytes_al = size_a_bytes_al << 6;
+            long rem_a = size_a_bytes - size_a_bytes_al;
+            rem_a = rem_a >> 3;
+            // get addr of lastblock
+            local_ptra = ptr_a + size_a_bytes_al;
+#ifdef DEBUG        
+            print("LOCAL PTRA:%lu", local_ptra);
+#endif
+            if(rem_a > 7){
+		        send_dram_read(local_ptra, 8, lista_ret_2);
+            }elif(rem_a == 7){
+		        send_dram_read(local_ptra, 7, lista_ret_2);
+            }elif(rem_a == 6){
+		        send_dram_read(local_ptra, 6, lista_ret_2);
+            }elif(rem_a == 5){
+		        send_dram_read(local_ptra, 5, lista_ret_2);
+            }elif(rem_a == 4){
+		        send_dram_read(local_ptra, 4, lista_ret_2);
+            }elif(rem_a == 3){
+		        send_dram_read(local_ptra, 3, lista_ret_2);
+            }elif(rem_a == 2){
+		        send_dram_read(local_ptra, 2, lista_ret_2);
+            }elif(rem_a == 1){
+		        send_dram_read(local_ptra, 1, lista_ret_2);
+            }else{
+                local_ptra = local_ptra - 64;
+		        send_dram_read(local_ptra, 8, lista_ret_2);
+            }
+        }else{
+            if(size_a > 7){
+		        send_dram_read(ptr_a, 8, lista_ret_1);
+            }elif(size_a == 7){
+		        send_dram_read(ptr_a, 7, lista_ret_1);
+            }elif(size_a == 6){
+		        send_dram_read(ptr_a, 6, lista_ret_1);
+            }elif(size_a == 5){
+		        send_dram_read(ptr_a, 5, lista_ret_1);
+            }elif(size_a == 4){
+		        send_dram_read(ptr_a, 4, lista_ret_1);
+            }elif(size_a == 3){
+		        send_dram_read(ptr_a, 3, lista_ret_1);
+            }elif(size_a == 2){
+		        send_dram_read(ptr_a, 2, lista_ret_1);
+            }else{
+		        send_dram_read(ptr_a, 1, lista_ret_1);
+            }
+        }
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] size_a:%lu size_b:%lu fla:%lu flb:%lu", NETID, size_a, size_b, fla, flb);
+#endif
+
+        if(flb > 0){
+		    send_dram_read(ptr_b, 8, listb_ret_1);
+            // get bytes
+            long size_b_bytes = size_b << 3; 
+            // get 64B aligned offset
+            long size_b_bytes_al = size_b_bytes >> 6;
+            size_b_bytes_al = size_b_bytes_al << 6;
+            long rem_b = size_b_bytes - size_b_bytes_al;
+            rem_b = rem_b >> 3;
+            // get addr of lastblock
+            local_ptrb = ptr_b + size_b_bytes_al;
+            if(rem_b > 7){
+		        send_dram_read(local_ptrb, 8, listb_ret_2);
+            }elif(rem_b == 7){
+		        send_dram_read(local_ptrb, 7, listb_ret_2);
+            }elif(rem_b == 6){
+		        send_dram_read(local_ptrb, 6, listb_ret_2);
+            }elif(rem_b == 5){
+		        send_dram_read(local_ptrb, 5, listb_ret_2);
+            }elif(rem_b == 4){
+		        send_dram_read(local_ptrb, 4, listb_ret_2);
+            }elif(rem_b == 3){
+		        send_dram_read(local_ptrb, 3, listb_ret_2);
+            }elif(rem_b == 2){
+		        send_dram_read(local_ptrb, 2, listb_ret_2);
+            }elif(rem_b == 1){
+		        send_dram_read(local_ptrb, 1, listb_ret_2);
+            }else{
+                local_ptrb = local_ptrb - 64;
+		        send_dram_read(local_ptrb, 8, listb_ret_2);
+            }
+        }else{
+            if(size_b > 7){
+		        send_dram_read(ptr_b, 8, listb_ret_1);
+            }elif(size_b == 7){
+		        send_dram_read(ptr_b, 7, listb_ret_1);
+            }elif(size_b == 6){
+		        send_dram_read(ptr_b, 6, listb_ret_1);
+            }elif(size_b == 5){
+		        send_dram_read(ptr_b, 5, listb_ret_1);
+            }elif(size_b == 4){
+		        send_dram_read(ptr_b, 4, listb_ret_1);
+            }elif(size_b == 3){
+		        send_dram_read(ptr_b, 3, listb_ret_1);
+            }elif(size_b == 2){
+		        send_dram_read(ptr_b, 2, listb_ret_1);
+            }else{
+		        send_dram_read(ptr_b, 1, listb_ret_1);
+            }
+        }
+        lmbuff[FLA] = fla;
+        lmbuff[FLB] = flb;
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_2' X0 " };
+#endif
+        yield;
+    }
+
+    event lista_ret_1(long op0, long op1,long op2,long op3,long op4,long op5,long op6, long op7){
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_3' X0 " };
+#endif
+        // Update the return count
+        int num_ops = ((CEVNT >> 20) & 0x7) + 1;
+        abreturn_count = abreturn_count - 1;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_1> num_ops:%lu ret_cnt:%lu op0:%lu", NETID, num_ops, abreturn_count, op0);
+#endif
+        // Get the num ops
+        long* local a_addr = lmbuff + (CURRA * 8); 
+	copyOperands(op0, a_addr, num_ops);
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_1> copy:%lu operands to base:%lu lm:%lu", NETID, num_ops, lmbuff, a_addr);
+#endif
+        if(abreturn_count == 0){
+            long phase = lmbuff[PHASE];
+            if(phase ==0){
+                long evword = evw_update_event(CEVNT, bounds_check);
+                send_event(evword, a_addr, evword);
+            }else{
+                long evword = evw_update_event(CEVNT, intersect_ab);
+                send_event(evword, a_addr, evword);
+            }
+        }
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_3' X0 " };
+#endif
+        yield;
+    }
+
+    event lista_ret_2(long op0, long op1,long op2,long op3,long op4,long op5,long op6, long op7){
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_4' X0 " };
+#endif
+        // Update the return count
+        int num_ops = ((CEVNT >> 20) & 0x7) + 1;
+        abreturn_count = abreturn_count - 1;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_2> num_ops:%lu ret_cnt:%lu op0:%lu ", NETID, num_ops, abreturn_count, op0);
+#endif
+        // Get the num ops
+        long* local a_addr = lmbuff + (LASTA * 8); 
+	copyOperands(op0, a_addr, num_ops);
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_2> copy:%lu operands to base:%lu lm:%lu", NETID, num_ops, lmbuff, a_addr);
+#endif
+        if(abreturn_count == 0){
+            long phase = lmbuff[PHASE];
+            if(phase ==0){
+                long evword = evw_update_event(CEVNT, bounds_check);
+                send_event(evword, a_addr, evword);
+            }else{
+                // This will never happen but let's leave it in there
+                long evword = evw_update_event(CEVNT, intersect_ab);
+                send_event(evword, a_addr, evword);
+            }
+        }
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_4' X0 " };
+#endif
+        yield;
+    }
+
+
+    event listb_ret_1(long op0, long op1, long op2,long op3,long op4,long op5,long op6,long op7){
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_5' X0 " };
+#endif
+        // Update the return count
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_1> CEVNT:%lu ", NETID, CEVNT);
+#endif
+        int num_ops = ((CEVNT >> 20) & 0x7) + 1;
+        abreturn_count = abreturn_count - 1;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_1> num_ops:%lu ret_cnt:%lu op0:%lu", NETID, num_ops, abreturn_count, op0);
+#endif
+        // Get the num ops
+        long* local b_addr = lmbuff + (CURRB * 8);
+		copyOperands(op0, b_addr, num_ops);
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_1> copy:%lu operands to base:%lu lm:%lu", NETID, num_ops, lmbuff, b_addr);
+#endif
+        if(abreturn_count == 0){
+            long phase = lmbuff[PHASE];
+            if(phase ==0){
+                long evword = evw_update_event(CEVNT, bounds_check);
+                send_event(evword, b_addr, evword);
+            }else{
+                long evword = evw_update_event(CEVNT, intersect_ab);
+                send_event(evword, b_addr, evword);
+            }
+        }
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_5' X0 " };
+#endif
+        yield;
+    }
+
+    event listb_ret_2(long op0, long op1, long op2,long op3,long op4,long op5,long op6,long op7){
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_6' X0 " };
+#endif
+        // Update the return count
+        int num_ops = ((CEVNT >> 20) & 0x7) + 1;
+        abreturn_count = abreturn_count - 1;
+        // Get the num ops
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <listb_ret_2> num_ops:%lu ret_cnt:%lu op0:%lu", NETID, num_ops, abreturn_count, op0);
+#endif
+        long* local b_addr = lmbuff + (LASTB * 8);
+		copyOperands(op0, b_addr, num_ops);
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <lista_ret_1> copy:%lu operands to base:%lu lm:%lu", NETID, num_ops, lmbuff, b_addr);
+#endif
+        if(abreturn_count == 0){
+            long phase = lmbuff[PHASE];
+            if(phase ==0){
+                long evword = evw_update_event(CEVNT, bounds_check);
+                send_event(evword, b_addr, evword);
+            }else{
+                // this will never happen but let's leave it in there
+                long evword = evw_update_event(CEVNT, intersect_ab);
+                send_event(evword, b_addr, evword);
+            }
+        }
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_6' X0 " };
+#endif
+        yield;
+    }
+
+    event bounds_check(){
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_7' X0 " };
+#endif
+        long first_a = lmbuff[CURRA];
+        long first_b = lmbuff[CURRB];
+        // last_a as a tmp reg to store threshold
+        long last_a = lmbuff[THRESHOLD];
+        long last_b;
+        long size_a = lmbuff[SIZEA];
+        long fl_ab = lmbuff[FLA];
+
+        if((first_a >= last_a) ||  (first_b >= last_a)){
+            // bounds check fail - return tc and terminate, v3 < v0
+            #ifdef DEBUG
+            size_a = lmbuff[MAINCONT];
+            last_a = lmbuff[TC];
+            fl_ab = lmbuff[V1];
+            last_b = lmbuff[V2];
+            print("[DEBUG][NWID %lu] <bounds_check> TC (%lu, %lu):%lu", NETID, fl_ab, last_b, last_a);
+            #endif
+#ifdef PERFLOG
+        asm { 
+            "perflog 1 10 '[NWID %lu] intersection (%lu, %lu) done' X0 %[vtx1] %[vtx2] " 
+        }: [vtx1] "r" (fl_ab), [vtx2] "r" (last_b);
+#endif
+#ifdef DEBUG        
+            print("[DEBUG][NWID %lu] <bounds_check> failed will return tc:%lu", NETID, last_a);
+#endif
+        //     unsigned long temp2 = lmbuff - LMBASE;
+        //     send_event(size_a, temp2, last_a, IGNRCONT);
+#ifdef DEBUG        
+            print("Terminate since bounds check failed");
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_7' X0 " };
+#endif
+            lmbuff = LMBASE;
+            lmbuff[TOP_FLAG_OFFSET] = 1;
+            yield_terminate;
+        }
+
+
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <bounds_check> check first_a:%lu size_a:%lu", NETID, first_a, size_a);
+#endif
+        size_a = size_a & 0x7;
+        if(size_a == 0){
+            size_a = 8;
+        }
+        
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <bounds_check> fla:%lu, mod_size_a:%lu", NETID, fl_ab, size_a);
+#endif
+        if(fl_ab == 0){
+            // last is within the 8 block offset = (size * 8) - 8
+            last_a = lmbuff[CURRA + size_a - 1];
+        }else{
+           // get the offset of the last block's last element 
+            last_a = lmbuff[LASTA + size_a - 1];
+        }
+        long size_b = lmbuff[SIZEB];
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <bounds_check> check first_b:%lu size_b:%lu", NETID, first_b, size_b);
+#endif
+        size_b = size_b & 0x7;
+        if(size_b == 0){
+            size_b = 8;
+        }
+        fl_ab = lmbuff[FLB];
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <bounds_check> flb:%lu mod_size_b:%lu", NETID, fl_ab, size_b);
+#endif
+        if(fl_ab == 0){
+            // last is within the 8 block offset = (size * 8) - 8
+            last_b = lmbuff[CURRB + size_b - 1];
+        }else{
+           // get the offset of the last block's last element 
+            last_b = lmbuff[LASTB + size_b - 1];
+        }
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <bounds_check> first_a:%lu, first_b:%lu, last_a:%lu, last_b:%lu", NETID, first_a, first_b, last_a, last_b);
+#endif
+        if((last_a < first_b) ||  (last_b < first_a)){
+            // bounds check fail - return tc and terminate
+            #ifdef DEBUG 
+            size_a = lmbuff[MAINCONT];
+            last_a = lmbuff[TC];
+            fl_ab = lmbuff[V1];
+            last_b = lmbuff[V2];
+            print("[DEBUG][NWID %lu] <bounds_check> TC (%lu, %lu):%lu", NETID, fl_ab, last_b, last_a);
+            #endif
+#ifdef PERFLOG
+        asm { 
+            "perflog 1 10 '[NWID %lu] intersection (%lu, %lu) done' X0 %[vtx1] %[vtx2] " 
+        }: [vtx1] "r" (fl_ab), [vtx2] "r" (last_b);
+#endif
+#ifdef DEBUG        
+            print("[DEBUG][NWID %lu] <bounds_check> failed will return tc:%lu", NETID, last_a);
+#endif
+        //     unsigned long temp2 = lmbuff - LMBASE;
+        //     send_event(size_a, temp2, last_a, IGNRCONT);
+#ifdef DEBUG        
+            print("Terminate since bounds check failed");
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_7' X0 " };
+#endif
+            lmbuff = LMBASE;
+            lmbuff[TOP_FLAG_OFFSET] = 1;
+            yield_terminate;
+        }
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <bounds_check> passed move to intersection", NETID);
+#endif
+        // bounds check passed now intersect CURRA and CURRB!
+        lmbuff[PHASE] = 1;
+        // now these are iterators change names
+        lmbuff[FLA] = 0;
+        lmbuff[FLB] = 0;
+        offs_a = 0;
+        offs_b = 0;
+        long evword = evw_update_event(CEVNT, intersect_ab);
+        send_event(evword, fl_ab, fl_ab, evword);
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_7' X0 " };
+#endif
+        yield;
+    }
+
+    event intersect_ab(){
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_start_8' X0 " };
+#endif
+        long* local alist = lmbuff + (CURRA * 8); 
+        long* local blist = lmbuff + (CURRB * 8); 
+        long loc_size_a = lmbuff[SIZEA];
+        long loc_size_b = lmbuff[SIZEB];
+        long iter_a = lmbuff[FLA];
+        long iter_b = lmbuff[FLB];
+        
+        long loc_tc = 0;
+
+        long rem = loc_size_a - iter_a;
+        // if rem < 8 then that's all that's remaining
+        if(rem > 8){
+            loc_size_a = 8;
+        }else{
+            loc_size_a = rem;
+        }
+        rem = loc_size_b - iter_b;
+        if(rem > 8){
+            loc_size_b = 8;
+        }else{
+            loc_size_b = rem;
+        }
+        loc_tc = 0;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> loc_size_a:%lu loc_size_b:%lu", NETID, loc_size_a, loc_size_b);
+#endif
+        // tmp reg iter_a = threshold, iter_b = end (0)
+        iter_a = lmbuff[THRESHOLD];
+        iter_b = 0;
+        // else walk through the two lists simultaeously
+        while((offs_a < loc_size_a) && (offs_b < loc_size_b)){
+            long elem_a = alist[offs_a];
+            long elem_b = blist[offs_b];
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> elem_a:%lu elem_b:%lu threshold:%ld", NETID, elem_a, elem_b, iter_a);
+#endif
+            if(elem_a >= iter_a){
+                iter_b = 1;
+                offs_a = loc_size_a;
+            }
+            elif(elem_b >= iter_a){
+                iter_b = 1;
+                offs_a = loc_size_a;
+            }
+            elif(elem_a < elem_b){
+                offs_a = offs_a + 1;
+            }elif(elem_b < elem_a){
+                offs_b = offs_b + 1;
+            }else{
+                loc_tc = loc_tc + 1;
+                offs_a = offs_a + 1;
+                offs_b = offs_b + 1;
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> tc_incremented:%lu", NETID, loc_tc);
+#endif
+            }
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> offs_a:%lu offs_b:%lu", NETID, offs_a, offs_b);
+#endif
+        } 
+        // update the loc tc
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> loc tc updated:%lu", NETID, loc_tc);
+#endif
+        lmbuff[TC] = lmbuff[TC] + loc_tc; 
+
+        // if intersect result > v0, end
+        if(iter_b == 1) 
+        {
+                #ifdef DEBUG
+                long evword = lmbuff[MAINCONT];
+                long tc = lmbuff[TC];
+                iter_a = lmbuff[V1];
+                iter_b = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <intersect> TC (%lu, %lu):%lu", NETID, iter_a, iter_b, tc);
+                #endif
+                lmbuff = LMBASE;
+                lmbuff[TOP_FLAG_OFFSET] = 1;
+                yield_terminate;
+
+        }
+
+        // one or both the lists exited --> whichever did fetch that
+        // update iter by how much ever was processed 
+        // check for bounds and fetch
+        // retain offs of the other one 
+        if(offs_a == loc_size_a){
+            iter_a = lmbuff[FLA];
+            unsigned long loc_size = lmbuff[SIZEA];
+            iter_a = iter_a + loc_size_a;
+            if(iter_a >= loc_size){
+                #ifdef DEBUG
+                long evword = lmbuff[MAINCONT];
+                long tc = lmbuff[TC];
+                iter_a = lmbuff[V1];
+                iter_b = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <intersect> TC (%lu, %lu):%lu", NETID, iter_a, iter_b, tc);
+                #endif
+#ifdef PERFLOG
+        asm { 
+            "perflog 1 11 '[NWID %lu] intersection (%lu, %lu) done' X0 %[vtx1] %[vtx2] " 
+        }: [vtx1] "r" (iter_a), [vtx2] "r" (iter_b);
+#endif
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> tc before return:%lu loc:%lu", NETID, tc, loc_tc);
+#endif
+                // //tc = tc + loc_tc;
+                // loc_size = lmbuff - LMBASE;
+                // send_event(evword, loc_size, tc, IGNRCONT);
+#ifdef DEBUG        
+                print("Terminate since lista is done");
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_8' X0 " };
+#endif
+                lmbuff = LMBASE;
+                iter_a = 1;
+                lmbuff[TOP_FLAG_OFFSET] = iter_a;
+                yield_terminate;
+            }
+        }
+        if(offs_b == loc_size_b){
+            iter_b = lmbuff[FLB];
+            unsigned long loc_size = lmbuff[SIZEB];
+            iter_b = iter_b + loc_size_b;
+            if(iter_b >= loc_size){
+                long evword = lmbuff[MAINCONT];
+                long tc = lmbuff[TC];
+                iter_a = lmbuff[V1];
+                iter_b = lmbuff[V2];
+                print("[DEBUG][NWID %lu] <intersect> TC (%lu, %lu):%lu", NETID, iter_a, iter_b, tc);
+#ifdef PERFLOG
+        asm { 
+            "perflog 1 12 '[NWID %lu] intersection (%lu, %lu) done' X0 %[vtx1] %[vtx2] " 
+        }: [vtx1] "r" (iter_a), [vtx2] "r" (iter_b);
+#endif
+#ifdef DEBUG        
+        print("[DEBUG][NWID %lu] <intersect> tc before return:%lu loc:%lu", NETID, tc, loc_tc);
+#endif
+                // //tc = tc + loc_tc;
+                // loc_size = lmbuff - LMBASE;
+                // send_event(evword, loc_size, tc, IGNRCONT);
+#ifdef DEBUG        
+                print("Terminate since lista is done");
+#endif
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_8' X0 " };
+#endif
+                lmbuff = LMBASE;
+                iter_a = 1;
+                lmbuff[TOP_FLAG_OFFSET] = iter_a;
+                yield_terminate;
+            }
+        }
+
+        if(offs_a == loc_size_a){
+            long loc_size = lmbuff[SIZEA];
+            rem = loc_size - iter_a;
+            unsigned long* local_ptr = lmbuff[PTRA];
+            // calculate 
+            local_ptr = local_ptr + (iter_a << 3);
+#ifdef DEBUG        
+            print("[DEBUG][NWID %lu] <intersect> next_addr_a:%lu rem:%lu iter_a:%lu", NETID, local_ptr, rem, iter_a);
+#endif
+            if(rem > 7){
+		        send_dram_read(local_ptr, 8, lista_ret_1);
+            }elif(rem == 7){
+		        send_dram_read(local_ptr, 7, lista_ret_1);
+            }elif(rem == 6){
+		        send_dram_read(local_ptr, 6, lista_ret_1);
+            }elif(rem == 5){
+		        send_dram_read(local_ptr, 5, lista_ret_1);
+            }elif(rem == 4){
+		        send_dram_read(local_ptr, 4, lista_ret_1);
+            }elif(rem == 3){
+		        send_dram_read(local_ptr, 3, lista_ret_1);
+            }elif(rem == 2){
+		        send_dram_read(local_ptr, 2, lista_ret_1);
+            }else{
+		        send_dram_read(local_ptr, 1, lista_ret_1);
+            }
+            // update
+            //loc_size = lmbuff[TC];
+            //lmbuff[TC] = loc_size + loc_tc;
+//#ifdef DEBUG        
+//        print("[DEBUG][NWID %lu] <intersect> tc before update:%lu loc:%lu", NETID, loc_size, loc_tc);
+//#endif
+            lmbuff[FLA] = iter_a;
+            offs_a = 0;
+            abreturn_count = abreturn_count + 1;
+        }
+        if(offs_b == loc_size_b){
+            long loc_size = lmbuff[SIZEB];
+            rem = loc_size - iter_b;
+            unsigned long* local_ptr = lmbuff[PTRB];
+            // calculate 
+            local_ptr = local_ptr + (iter_b << 3);
+#ifdef DEBUG        
+            print("[DEBUG][NWID %lu] <intersect> next_addr_b:%lu rem:%lu iter_b:%lu", NETID, local_ptr, rem, iter_b);
+#endif
+            if(rem > 7){
+		        send_dram_read(local_ptr, 8, listb_ret_1);
+            }elif(rem == 7){
+		        send_dram_read(local_ptr, 7, listb_ret_1);
+            }elif(rem == 6){
+		        send_dram_read(local_ptr, 6, listb_ret_1);
+            }elif(rem == 5){
+		        send_dram_read(local_ptr, 5, listb_ret_1);
+            }elif(rem == 4){
+		        send_dram_read(local_ptr, 4, listb_ret_1);
+            }elif(rem == 3){
+		        send_dram_read(local_ptr, 3, listb_ret_1);
+            }elif(rem == 2){
+		        send_dram_read(local_ptr, 2, listb_ret_1);
+            }else{
+		        send_dram_read(local_ptr, 1, listb_ret_1);
+            }
+            // update
+            //loc_size = lmbuff[TC];
+            //lmbuff[TC] = loc_size + loc_tc;
+//#ifdef DEBUG        
+//        print("[DEBUG][NWID %lu] <intersect> tc before update:%lu loc:%lu", NETID, loc_size, loc_tc);
+//#endif
+            lmbuff[FLB] = iter_b;
+            offs_b = 0;
+            abreturn_count = abreturn_count + 1;
+        }
+#ifdef DETAIL_PERF
+        asm {"perflog 1 3 '[NWID %lu] v1v2_end_8' X0 " };
+#endif
+    }
+}

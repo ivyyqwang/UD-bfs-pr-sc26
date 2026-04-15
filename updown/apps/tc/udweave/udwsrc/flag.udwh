@@ -1,0 +1,8 @@
+#ifndef __flag_H__
+#define __flag_H__
+
+// #define DEBUG
+// #define PRINT_intersect_result
+// #define NO_ADVANCED_STOP
+
+#endif

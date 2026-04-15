@@ -1,0 +1,343 @@
+from linker.EFAProgram import efaProgram
+
+## UDWeave version: 02d7c60 (2026-01-27)
+
+## Global constants
+
+@efaProgram
+def EFA_main_master(efa):
+  efa.code_level = 'machine'
+  state0 = efa.State("udweave_init") #Only one state code 
+  efa.add_initId(state0.state_id)
+  ## Static declarations
+  ## Scoped Variable "tc_cumulative" uses Register X16, scope (0)
+  ## Scoped Variable "num_lanes" uses Register X17, scope (0)
+  ## Scoped Variable "num_lanes_per_control" uses Register X18, scope (0)
+  ## Scoped Variable "control_level" uses Register X19, scope (0)
+  ## Scoped Variable "num_map" uses Register X20, scope (0)
+  ## Scoped Variable "num_map_done" uses Register X21, scope (0)
+  ## This is all metadata information
+  ## #define DEBUG
+  ## #define PRINT_intersect_result
+  ## #define NO_ADVANCED_STOP
+  ## This is all metadata information
+  ## Total threads used in TC
+  ## #define WORKER_THREADS 120
+  ## #define NUM_MASTERS 8
+  ## #define NUM_INTERSECTORS 112
+  ## Each threads in the same lane shared the following scratchpad
+  ## send buffer 4 - 18 (15 words)
+  ## master, intersection launcher offsets
+  ## Each thread's own private scratchpad size: [(THREAD_STATUS << 3) + TID * THREAD_LM_SIZE, (THREAD_STATUS << 3) + (TID+1) * THREAD_LM_SIZE]
+  ## #define DEBUG
+  
+  #################################################
+  ###### Writing code for thread main_master ######
+  #################################################
+  # Writing code for event main_master::init_tc
+  tranmain_master__init_tc = efa.writeEvent('main_master::init_tc')
+  tranmain_master__init_tc.writeAction(f"__entry: bneiu X15 0 __if_init_tc_2_post") 
+  tranmain_master__init_tc.writeAction(f"__if_init_tc_0_true: print '[DEBUG] Main TC Master Start'") 
+  tranmain_master__init_tc.writeAction(f"movir X22 65520") 
+  tranmain_master__init_tc.writeAction(f"add X7 X22 X22") 
+  tranmain_master__init_tc.writeAction(f"movir X23 0") 
+  tranmain_master__init_tc.writeAction(f"movrl X23 0(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"movir X23 0") 
+  tranmain_master__init_tc.writeAction(f"movrl X23 8(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"addi X8 X17 0") 
+  tranmain_master__init_tc.writeAction(f"__if_init_tc_2_post: movir X23 1") 
+  tranmain_master__init_tc.writeAction(f"sl X23 X14 X23") 
+  tranmain_master__init_tc.writeAction(f"subi X8 X18 1") 
+  tranmain_master__init_tc.writeAction(f"sr X18 X14 X24") 
+  tranmain_master__init_tc.writeAction(f"addi X24 X18 1") 
+  tranmain_master__init_tc.writeAction(f"bneiu X18 1 __if_init_tc_4_false") 
+  tranmain_master__init_tc.writeAction(f"__if_init_tc_3_true: addi X8 X20 0") 
+  tranmain_master__init_tc.writeAction(f"addi X7 X22 32") 
+  tranmain_master__init_tc.writeAction(f"movrl X8 0(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"movir X24 10") 
+  tranmain_master__init_tc.writeAction(f"movrl X24 8(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"movir X24 220") 
+  tranmain_master__init_tc.writeAction(f"movrl X24 16(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"movrl X9 56(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"addi X0 X24 0") 
+  tranmain_master__init_tc.writeAction(f"addi X8 X25 0")  # This is for casting. May be used later on
+  tranmain_master__init_tc.writeAction(f"add X24 X25 X25") 
+  tranmain_master__init_tc.writeAction(f"addi X25 X25 0")  # This is for casting. May be used later on
+  tranmain_master__init_tc.writeAction(f"__while_init_tc_6_condition: addi X25 X26 0")  # This is for casting. May be used later on
+  tranmain_master__init_tc.writeAction(f"ble X26 X24 __while_init_tc_8_post") 
+  tranmain_master__init_tc.writeAction(f"__while_init_tc_7_body: addi X11 X26 0")  # This is for casting. May be used later on
+  tranmain_master__init_tc.writeAction(f"mul X24 X26 X26") 
+  tranmain_master__init_tc.writeAction(f"add X10 X26 X26") 
+  tranmain_master__init_tc.writeAction(f"addi X26 X26 8") 
+  tranmain_master__init_tc.writeAction(f"movrl X26 24(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"subi X11 X26 8") 
+  tranmain_master__init_tc.writeAction(f"movrl X26 32(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"addi X13 X26 0")  # This is for casting. May be used later on
+  tranmain_master__init_tc.writeAction(f"mul X24 X26 X26") 
+  tranmain_master__init_tc.writeAction(f"add X12 X26 X26") 
+  tranmain_master__init_tc.writeAction(f"movrl X26 40(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"movrl X13 48(X22) 0 8") 
+  ## print("[DEBUG][NWID %lu] send to %lu dram_head:0x%lx master_start 0x%lx, %lu", NETID, netid, lmbuff[3], master_start, _control_level);
+
+  tranmain_master__init_tc.writeAction(f"movir X26 0") 
+  tranmain_master__init_tc.writeAction(f"evlb X26 master_launcher__init") 
+  tranmain_master__init_tc.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__init_tc.writeAction(f"ev X26 X26 X24 X24 8") 
+  tranmain_master__init_tc.writeAction(f"send_wret X26 main_master::init_done X22 8 X27") 
+  tranmain_master__init_tc.writeAction(f"addi X24 X24 1") 
+  tranmain_master__init_tc.writeAction(f"jmp __while_init_tc_6_condition") 
+  tranmain_master__init_tc.writeAction(f"__while_init_tc_8_post: jmp __if_init_tc_5_post") 
+  tranmain_master__init_tc.writeAction(f"__if_init_tc_4_false: addi X23 X20 0") 
+  tranmain_master__init_tc.writeAction(f"addi X7 X22 32") 
+  tranmain_master__init_tc.writeAction(f"movrl X18 0(X22) 0 8") 
+  ## lmbuff[1] = g_v_in;
+
+  ## lmbuff[2] = master_start;
+
+  ## lmbuff[3] = master_size;
+
+  ## lmbuff[4] = intersection_start;
+
+  ## lmbuff[5] = intersection_size;
+
+  ## lmbuff[6] = log2_num_control_lane;
+
+  tranmain_master__init_tc.writeAction(f"addi X22 X24 8") 
+  tranmain_master__init_tc.writeAction(f"bcpyoli X9 X24 6") 
+  tranmain_master__init_tc.writeAction(f"addi X15 X24 1") 
+  tranmain_master__init_tc.writeAction(f"movrl X24 56(X22) 0 8") 
+  tranmain_master__init_tc.writeAction(f"addi X0 X24 0")  # This is for casting. May be used later on
+  tranmain_master__init_tc.writeAction(f"mul X18 X23 X25") 
+  tranmain_master__init_tc.writeAction(f"add X25 X24 X25") 
+  tranmain_master__init_tc.writeAction(f"__while_init_tc_9_condition: ble X25 X24 __if_init_tc_5_post") 
+  tranmain_master__init_tc.writeAction(f"__while_init_tc_10_body: movir X26 0") 
+  tranmain_master__init_tc.writeAction(f"evlb X26 main_master::init_tc") 
+  tranmain_master__init_tc.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__init_tc.writeAction(f"ev X26 X26 X24 X24 8") 
+  tranmain_master__init_tc.writeAction(f"send_wret X26 main_master::init_done X22 8 X27") 
+  ## print("[DEBUG][NWID %lu] send0 to %lu num_lanes_per_control:%lu master_start 0x%lx, %lu", NETID, mlane_id, num_lanes_per_control, master_start, _control_level);
+
+  tranmain_master__init_tc.writeAction(f"add X24 X18 X24") 
+  tranmain_master__init_tc.writeAction(f"jmp __while_init_tc_9_condition") 
+  tranmain_master__init_tc.writeAction(f"__if_init_tc_5_post: movir X16 0") 
+  tranmain_master__init_tc.writeAction(f"movir X21 0") 
+  tranmain_master__init_tc.writeAction(f"addi X15 X19 0") 
+  tranmain_master__init_tc.writeAction(f"movir X23 61664") 
+  tranmain_master__init_tc.writeAction(f"add X7 X23 X22") 
+  tranmain_master__init_tc.writeAction(f"sli X19 X23 1") 
+  tranmain_master__init_tc.writeAction(f"sri X2 X25 24") 
+  tranmain_master__init_tc.writeAction(f"andi X25 X25 255") 
+  tranmain_master__init_tc.writeAction(f"movwrl X25 X22(X23,0,0)") 
+  tranmain_master__init_tc.writeAction(f"addi X23 X23 1") 
+  tranmain_master__init_tc.writeAction(f"movwrl X1 X22(X23,0,0)") 
+  ## print("[DEBUG][NWID %lu] init end", NETID);
+
+  tranmain_master__init_tc.writeAction(f"yield") 
+  
+  # Writing code for event main_master::init_done
+  tranmain_master__init_done = efa.writeEvent('main_master::init_done')
+  tranmain_master__init_done.writeAction(f"__entry: addi X21 X21 1") 
+  tranmain_master__init_done.writeAction(f"bneu X21 X20 __if_init_done_2_post") 
+  tranmain_master__init_done.writeAction(f"__if_init_done_0_true: movir X21 0") 
+  tranmain_master__init_done.writeAction(f"bneiu X19 0 __if_init_done_4_false") 
+  tranmain_master__init_done.writeAction(f"__if_init_done_3_true: evi X2 X22 main_master::start 1") 
+  tranmain_master__init_done.writeAction(f"sendr_wret X22 main_master::v_launcher_done X17 X17 X23") 
+  tranmain_master__init_done.writeAction(f"print '[DEBUG][NWID %lu] <init_done> finsh' X0") 
+  tranmain_master__init_done.writeAction(f"jmp __if_init_done_2_post") 
+  tranmain_master__init_done.writeAction(f"__if_init_done_4_false: movir X22 61664") 
+  tranmain_master__init_done.writeAction(f"add X7 X22 X22") 
+  tranmain_master__init_done.writeAction(f"sli X19 X23 1") 
+  tranmain_master__init_done.writeAction(f"addi X23 X23 1") 
+  tranmain_master__init_done.writeAction(f"movwlr X22(X23,0,0) X22") 
+  tranmain_master__init_done.writeAction(f"movir X23 -1") 
+  tranmain_master__init_done.writeAction(f"sri X23 X23 1") 
+  tranmain_master__init_done.writeAction(f"sendr_wcont X22 X23 X0 X0") 
+  tranmain_master__init_done.writeAction(f"__if_init_done_2_post: yield") 
+  
+  # Writing code for event main_master::send_to_global_master_thread
+  tranmain_master__send_to_global_master_thread = efa.writeEvent('main_master::send_to_global_master_thread')
+  tranmain_master__send_to_global_master_thread.writeAction(f"__entry: movir X22 61664") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"add X7 X22 X22") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"sli X10 X23 1") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"movwlr X22(X23,0,0) X25") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"addi X25 X25 0")  # This is for casting. May be used later on
+  tranmain_master__send_to_global_master_thread.writeAction(f"addi X23 X23 1") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"movwrl X1 X22(X23,0,0)") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"ev X8 X25 X25 X25 4") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"sendr_wcont X25 X1 X9 X9") 
+  tranmain_master__send_to_global_master_thread.writeAction(f"yield_terminate") 
+  
+  # Writing code for event main_master::start
+  tranmain_master__start = efa.writeEvent('main_master::start')
+  tranmain_master__start.writeAction(f"__entry: addi X8 X17 0") 
+  tranmain_master__start.writeAction(f"bneiu X18 1 __if_start_1_false") 
+  tranmain_master__start.writeAction(f"__if_start_0_true: evi X2 X25 master_launcher__launch_v 1") 
+  tranmain_master__start.writeAction(f"movir X21 0") 
+  tranmain_master__start.writeAction(f"addi X0 X22 0") 
+  tranmain_master__start.writeAction(f"addi X20 X23 0")  # This is for casting. May be used later on
+  tranmain_master__start.writeAction(f"add X22 X23 X23") 
+  tranmain_master__start.writeAction(f"__while_start_3_condition: ble X23 X22 __while_start_5_post") 
+  tranmain_master__start.writeAction(f"__while_start_4_body: ev X25 X24 X22 X22 8") 
+  tranmain_master__start.writeAction(f"movir X26 0") 
+  tranmain_master__start.writeAction(f"evlb X26 master_launcher__send_to_master_thread1") 
+  tranmain_master__start.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__start.writeAction(f"ev X26 X26 X22 X22 8") 
+  tranmain_master__start.writeAction(f"sendr_wret X26 main_master::v_launcher_done X24 X17 X27") 
+  tranmain_master__start.writeAction(f"addi X22 X22 1") 
+  tranmain_master__start.writeAction(f"jmp __while_start_3_condition") 
+  tranmain_master__start.writeAction(f"__while_start_5_post: jmp __if_start_2_post") 
+  tranmain_master__start.writeAction(f"__if_start_1_false: evi X2 X22 main_master::start 1") 
+  tranmain_master__start.writeAction(f"addi X0 X25 0") 
+  tranmain_master__start.writeAction(f"mul X20 X18 X23") 
+  tranmain_master__start.writeAction(f"addi X23 X23 0")  # This is for casting. May be used later on
+  tranmain_master__start.writeAction(f"add X25 X23 X23") 
+  tranmain_master__start.writeAction(f"__while_start_6_condition: ble X23 X25 __if_start_2_post") 
+  tranmain_master__start.writeAction(f"__while_start_7_body: ev X22 X24 X25 X25 8") 
+  tranmain_master__start.writeAction(f"movir X26 0") 
+  tranmain_master__start.writeAction(f"evlb X26 main_master::send_to_global_master_thread") 
+  tranmain_master__start.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__start.writeAction(f"ev X26 X26 X25 X25 8") 
+  tranmain_master__start.writeAction(f"addi X19 X27 1") 
+  tranmain_master__start.writeAction(f"sendr3_wret X26 main_master::v_launcher_done X24 X17 X27 X28") 
+  tranmain_master__start.writeAction(f"addi X18 X24 0")  # This is for casting. May be used later on
+  tranmain_master__start.writeAction(f"add X25 X24 X25") 
+  tranmain_master__start.writeAction(f"jmp __while_start_6_condition") 
+  tranmain_master__start.writeAction(f"__if_start_2_post: yield") 
+  
+  # Writing code for event main_master::v_launcher_done
+  tranmain_master__v_launcher_done = efa.writeEvent('main_master::v_launcher_done')
+  tranmain_master__v_launcher_done.writeAction(f"__entry: addi X21 X21 1") 
+  tranmain_master__v_launcher_done.writeAction(f"bneu X21 X20 __if_v_launcher_done_2_post") 
+  tranmain_master__v_launcher_done.writeAction(f"__if_v_launcher_done_0_true: movir X21 0") 
+  tranmain_master__v_launcher_done.writeAction(f"bneiu X19 0 __if_v_launcher_done_4_false") 
+  tranmain_master__v_launcher_done.writeAction(f"__if_v_launcher_done_3_true: evi X2 X23 main_master::v_all_launched 1") 
+  tranmain_master__v_launcher_done.writeAction(f"sendr_wret X23 main_master::int_launcher_done X19 X19 X25") 
+  tranmain_master__v_launcher_done.writeAction(f"print '[DEBUG][NWID %lu] <map_launcher_done> ' X0") 
+  tranmain_master__v_launcher_done.writeAction(f"jmp __if_v_launcher_done_2_post") 
+  tranmain_master__v_launcher_done.writeAction(f"__if_v_launcher_done_4_false: movir X23 61664") 
+  tranmain_master__v_launcher_done.writeAction(f"add X7 X23 X23") 
+  tranmain_master__v_launcher_done.writeAction(f"sli X19 X25 1") 
+  tranmain_master__v_launcher_done.writeAction(f"addi X25 X25 1") 
+  tranmain_master__v_launcher_done.writeAction(f"movwlr X23(X25,0,0) X23") 
+  tranmain_master__v_launcher_done.writeAction(f"movir X25 -1") 
+  tranmain_master__v_launcher_done.writeAction(f"sri X25 X25 1") 
+  tranmain_master__v_launcher_done.writeAction(f"sendr_wcont X23 X25 X23 X23") 
+  tranmain_master__v_launcher_done.writeAction(f"__if_v_launcher_done_2_post: yield") 
+  
+  # Writing code for event main_master::v_all_launched
+  tranmain_master__v_all_launched = efa.writeEvent('main_master::v_all_launched')
+  tranmain_master__v_all_launched.writeAction(f"__entry: bneiu X18 1 __if_v_all_launched_1_false") 
+  tranmain_master__v_all_launched.writeAction(f"__if_v_all_launched_0_true: evi X2 X23 master_launcher__all_launched 1") 
+  tranmain_master__v_all_launched.writeAction(f"addi X0 X25 0") 
+  tranmain_master__v_all_launched.writeAction(f"addi X20 X22 0")  # This is for casting. May be used later on
+  tranmain_master__v_all_launched.writeAction(f"add X25 X22 X22") 
+  tranmain_master__v_all_launched.writeAction(f"__while_v_all_launched_3_condition: ble X22 X25 __while_v_all_launched_5_post") 
+  tranmain_master__v_all_launched.writeAction(f"__while_v_all_launched_4_body: ev X23 X24 X25 X25 8") 
+  tranmain_master__v_all_launched.writeAction(f"movir X26 0") 
+  tranmain_master__v_all_launched.writeAction(f"evlb X26 master_launcher__send_to_master_thread1") 
+  tranmain_master__v_all_launched.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__v_all_launched.writeAction(f"ev X26 X26 X25 X25 8") 
+  tranmain_master__v_all_launched.writeAction(f"sendr_wret X26 main_master::int_launcher_done X24 X0 X27") 
+  tranmain_master__v_all_launched.writeAction(f"addi X25 X25 1") 
+  tranmain_master__v_all_launched.writeAction(f"jmp __while_v_all_launched_3_condition") 
+  tranmain_master__v_all_launched.writeAction(f"__while_v_all_launched_5_post: jmp __if_v_all_launched_2_post") 
+  tranmain_master__v_all_launched.writeAction(f"__if_v_all_launched_1_false: evi X2 X25 main_master::v_all_launched 1") 
+  tranmain_master__v_all_launched.writeAction(f"addi X0 X23 0") 
+  tranmain_master__v_all_launched.writeAction(f"mul X20 X18 X22") 
+  tranmain_master__v_all_launched.writeAction(f"addi X22 X22 0")  # This is for casting. May be used later on
+  tranmain_master__v_all_launched.writeAction(f"add X23 X22 X22") 
+  tranmain_master__v_all_launched.writeAction(f"__while_v_all_launched_6_condition: ble X22 X23 __if_v_all_launched_2_post") 
+  tranmain_master__v_all_launched.writeAction(f"__while_v_all_launched_7_body: ev X25 X24 X23 X23 8") 
+  tranmain_master__v_all_launched.writeAction(f"movir X26 0") 
+  tranmain_master__v_all_launched.writeAction(f"evlb X26 main_master::send_to_global_master_thread") 
+  tranmain_master__v_all_launched.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__v_all_launched.writeAction(f"ev X26 X26 X23 X23 8") 
+  tranmain_master__v_all_launched.writeAction(f"addi X19 X27 1") 
+  tranmain_master__v_all_launched.writeAction(f"sendr3_wret X26 main_master::int_launcher_done X24 X23 X27 X28") 
+  tranmain_master__v_all_launched.writeAction(f"addi X18 X24 0")  # This is for casting. May be used later on
+  tranmain_master__v_all_launched.writeAction(f"add X23 X24 X23") 
+  tranmain_master__v_all_launched.writeAction(f"jmp __while_v_all_launched_6_condition") 
+  tranmain_master__v_all_launched.writeAction(f"__if_v_all_launched_2_post: yield") 
+  
+  # Writing code for event main_master::int_launcher_done
+  tranmain_master__int_launcher_done = efa.writeEvent('main_master::int_launcher_done')
+  tranmain_master__int_launcher_done.writeAction(f"__entry: addi X21 X21 1") 
+  tranmain_master__int_launcher_done.writeAction(f"bneu X21 X20 __if_int_launcher_done_2_post") 
+  tranmain_master__int_launcher_done.writeAction(f"__if_int_launcher_done_0_true: movir X21 0") 
+  tranmain_master__int_launcher_done.writeAction(f"bneiu X19 0 __if_int_launcher_done_4_false") 
+  tranmain_master__int_launcher_done.writeAction(f"__if_int_launcher_done_3_true: evi X2 X23 main_master::int_all_launched 1") 
+  tranmain_master__int_launcher_done.writeAction(f"sendr_wret X23 main_master::tc_launcher_done X19 X19 X25") 
+  tranmain_master__int_launcher_done.writeAction(f"print '[DEBUG][NWID %lu] <int_launcher_done>' X0") 
+  tranmain_master__int_launcher_done.writeAction(f"jmp __if_int_launcher_done_2_post") 
+  tranmain_master__int_launcher_done.writeAction(f"__if_int_launcher_done_4_false: movir X23 61664") 
+  tranmain_master__int_launcher_done.writeAction(f"add X7 X23 X23") 
+  tranmain_master__int_launcher_done.writeAction(f"sli X19 X25 1") 
+  tranmain_master__int_launcher_done.writeAction(f"addi X25 X25 1") 
+  tranmain_master__int_launcher_done.writeAction(f"movwlr X23(X25,0,0) X23") 
+  tranmain_master__int_launcher_done.writeAction(f"movir X25 -1") 
+  tranmain_master__int_launcher_done.writeAction(f"sri X25 X25 1") 
+  tranmain_master__int_launcher_done.writeAction(f"sendr_wcont X23 X25 X23 X23") 
+  tranmain_master__int_launcher_done.writeAction(f"__if_int_launcher_done_2_post: yield") 
+  
+  # Writing code for event main_master::int_all_launched
+  tranmain_master__int_all_launched = efa.writeEvent('main_master::int_all_launched')
+  tranmain_master__int_all_launched.writeAction(f"__entry: bneiu X18 1 __if_int_all_launched_1_false") 
+  tranmain_master__int_all_launched.writeAction(f"__if_int_all_launched_0_true: evi X2 X23 intersection_launcher__get_tc 1") 
+  tranmain_master__int_all_launched.writeAction(f"addi X0 X25 0") 
+  tranmain_master__int_all_launched.writeAction(f"addi X20 X22 0")  # This is for casting. May be used later on
+  tranmain_master__int_all_launched.writeAction(f"add X25 X22 X22") 
+  tranmain_master__int_all_launched.writeAction(f"__while_int_all_launched_3_condition: ble X22 X25 __while_int_all_launched_5_post") 
+  tranmain_master__int_all_launched.writeAction(f"__while_int_all_launched_4_body: ev X23 X24 X25 X25 8") 
+  tranmain_master__int_all_launched.writeAction(f"movir X26 0") 
+  tranmain_master__int_all_launched.writeAction(f"evlb X26 intersection_launcher__send_to_worker_thread2") 
+  tranmain_master__int_all_launched.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__int_all_launched.writeAction(f"ev X26 X26 X25 X25 8") 
+  tranmain_master__int_all_launched.writeAction(f"sendr3_wret X26 main_master::tc_launcher_done X24 X25 X0 X27") 
+  tranmain_master__int_all_launched.writeAction(f"addi X25 X25 1") 
+  tranmain_master__int_all_launched.writeAction(f"jmp __while_int_all_launched_3_condition") 
+  tranmain_master__int_all_launched.writeAction(f"__while_int_all_launched_5_post: jmp __if_int_all_launched_2_post") 
+  tranmain_master__int_all_launched.writeAction(f"__if_int_all_launched_1_false: evi X2 X22 main_master::int_all_launched 1") 
+  tranmain_master__int_all_launched.writeAction(f"addi X0 X25 0") 
+  tranmain_master__int_all_launched.writeAction(f"mul X20 X18 X23") 
+  tranmain_master__int_all_launched.writeAction(f"addi X23 X23 0")  # This is for casting. May be used later on
+  tranmain_master__int_all_launched.writeAction(f"add X25 X23 X23") 
+  tranmain_master__int_all_launched.writeAction(f"__while_int_all_launched_6_condition: ble X23 X25 __if_int_all_launched_2_post") 
+  tranmain_master__int_all_launched.writeAction(f"__while_int_all_launched_7_body: ev X22 X24 X25 X25 8") 
+  tranmain_master__int_all_launched.writeAction(f"movir X26 0") 
+  tranmain_master__int_all_launched.writeAction(f"evlb X26 main_master::send_to_global_master_thread") 
+  tranmain_master__int_all_launched.writeAction(f"evi X26 X26 255 4") 
+  tranmain_master__int_all_launched.writeAction(f"ev X26 X26 X25 X25 8") 
+  tranmain_master__int_all_launched.writeAction(f"addi X19 X27 1") 
+  tranmain_master__int_all_launched.writeAction(f"sendr3_wret X26 main_master::tc_launcher_done X24 X19 X27 X28") 
+  tranmain_master__int_all_launched.writeAction(f"addi X18 X24 0")  # This is for casting. May be used later on
+  tranmain_master__int_all_launched.writeAction(f"add X25 X24 X25") 
+  tranmain_master__int_all_launched.writeAction(f"jmp __while_int_all_launched_6_condition") 
+  tranmain_master__int_all_launched.writeAction(f"__if_int_all_launched_2_post: yield") 
+  
+  # Writing code for event main_master::tc_launcher_done
+  tranmain_master__tc_launcher_done = efa.writeEvent('main_master::tc_launcher_done')
+  tranmain_master__tc_launcher_done.writeAction(f"__entry: addi X21 X21 1") 
+  tranmain_master__tc_launcher_done.writeAction(f"add X16 X8 X16") 
+  tranmain_master__tc_launcher_done.writeAction(f"addi X7 X23 0") 
+  tranmain_master__tc_launcher_done.writeAction(f"bneu X21 X20 __if_tc_launcher_done_2_post") 
+  tranmain_master__tc_launcher_done.writeAction(f"__if_tc_launcher_done_0_true: movir X21 0") 
+  tranmain_master__tc_launcher_done.writeAction(f"bneiu X19 0 __if_tc_launcher_done_4_false") 
+  tranmain_master__tc_launcher_done.writeAction(f"__if_tc_launcher_done_3_true: movir X25 65520") 
+  tranmain_master__tc_launcher_done.writeAction(f"add X7 X25 X23") 
+  tranmain_master__tc_launcher_done.writeAction(f"movrl X16 0(X23) 0 8") 
+  tranmain_master__tc_launcher_done.writeAction(f"print '[DEBUG] <tc_return> result:%lu' X16") 
+  tranmain_master__tc_launcher_done.writeAction(f"movir X25 1") 
+  tranmain_master__tc_launcher_done.writeAction(f"movrl X25 8(X23) 0 8") 
+  tranmain_master__tc_launcher_done.writeAction(f"yield_terminate") 
+  tranmain_master__tc_launcher_done.writeAction(f"jmp __if_tc_launcher_done_2_post") 
+  tranmain_master__tc_launcher_done.writeAction(f"__if_tc_launcher_done_4_false: sli X19 X25 1") 
+  tranmain_master__tc_launcher_done.writeAction(f"movir X22 61664") 
+  tranmain_master__tc_launcher_done.writeAction(f"add X7 X22 X23") 
+  tranmain_master__tc_launcher_done.writeAction(f"addi X25 X25 1") 
+  tranmain_master__tc_launcher_done.writeAction(f"movwlr X23(X25,0,0) X25") 
+  tranmain_master__tc_launcher_done.writeAction(f"movir X22 -1") 
+  tranmain_master__tc_launcher_done.writeAction(f"sri X22 X22 1") 
+  tranmain_master__tc_launcher_done.writeAction(f"sendr_wcont X25 X22 X16 X0") 
+  tranmain_master__tc_launcher_done.writeAction(f"yield_terminate") 
+  tranmain_master__tc_launcher_done.writeAction(f"__if_tc_launcher_done_2_post: yield") 
+  
