@@ -6,6 +6,7 @@ include_directories(BEFORE
   ../common/include
   ../asm/include
   ../lane/include
+  ../../runtime/include
 )
 
 add_library(ISAElements SHARED

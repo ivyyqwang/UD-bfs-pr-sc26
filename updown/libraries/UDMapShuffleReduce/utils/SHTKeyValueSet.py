@@ -1,7 +1,7 @@
 from linker.EFAProgram import EFAProgram
 from LinkableKeyValueSetTPL import KeyValueSetInterface
-from libraries.ScalableHashTable.linkable.sht_ext_call_macros import SHTExt
-from libraries.ScalableHashTable.linkable.sht_call_macros import SHT
+from sht_ext_call_macros import SHTExt
+from sht_call_macros import SHT
 from Macro import *
 
 class SHTKeyValueSet(KeyValueSetInterface):

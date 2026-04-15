@@ -73,7 +73,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     add_subdirectory(tests)
     if(BASIM_ASSEMBLE_TESTS)
       message("Will Assemble all tests ${PROJECT_SOURCE_DIR}")
-      execute_process(COMMAND ${PYTHON_EXECUTABLE} ${assem_prog}
+      execute_process(COMMAND ${Python3_EXECUTABLE} ${assem_prog}
                       WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/assembler
                       RESULT_VARIABLE exec_result)
       message("result" ${exec_result})
@@ -88,12 +88,12 @@ else()
     set(BASIM_DEBUG False)
   endif()
 
-  message (STATUS "PROJ :$ENV{PROJ}")
   if (DEFINED CMAKE_GEM5_BASE)
     set(GEM5_BASE_DIR "${CMAKE_GEM5_BASE}")
   endif ()
 
   include_directories(BEFORE
+      ../runtime/include/
       common/include
       accel/include
       mem/include

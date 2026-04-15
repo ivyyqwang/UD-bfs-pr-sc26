@@ -150,10 +150,6 @@ protected:
    * function must be re-implemented
    */
 private:
-  void initPythonInterface(EmulatorLogLevel printLevel,
-                           bool perf_log_enable = false,
-                           bool perf_log_internal_enable = false);
-
   void executeSingleLane(uint8_t ud_id, uint8_t lane_num);
 
 public:

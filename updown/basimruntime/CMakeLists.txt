@@ -68,6 +68,8 @@ INSTALL(TARGETS UpDownBASimRuntimeStatic
 INSTALL(FILES ${STAT_HEADER} DESTINATION ${UPDOWN_RUNTIME_HEADERS_INSTALL_PATH})
 add_definitions(-DUPDOWN_INSTALL_DIR="${CMAKE_INSTALL_PREFIX}/${UPDOWN_RUNTIME_LIB}" -DUPDOWN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src" )
 
+add_subdirectory(tests)
+
 if (DEFINED CMAKE_GEM5_BASE)
     target_link_libraries(UpDownBASimRuntime PUBLIC UpDownSimRuntime UpDownRuntime UDAccelerator UDMemory LaneElements ISAElements m rt m5)
     target_link_libraries(UpDownBASimRuntimeStatic PUBLIC UpDownSimRuntimeStatic UpDownRuntimeStatic UDMemoryStatic UDAcceleratorStatic m rt m5)

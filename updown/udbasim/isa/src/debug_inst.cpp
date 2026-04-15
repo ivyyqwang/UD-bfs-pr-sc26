@@ -14,71 +14,83 @@ namespace basim {
 
 #ifndef __REG_NAMES_MAP__
 #define __REG_NAMES_MAP__
-/* Register Encodings Map */
-std::unordered_map<std::string, RegId> REG_NAMES_MAP = {
-  {"X0", RegId::X0},
-  {"X1", RegId::X1},
-  {"X2", RegId::X2},
-  {"X3", RegId::X3},
-  {"X4", RegId::X4},
-  {"X5", RegId::X5},
-  {"X6", RegId::X6},
-  {"X7", RegId::X7},
-  {"X8", RegId::X8},
-  {"X9", RegId::X9},
-  {"X10", RegId::X10},
-  {"X11", RegId::X11},
-  {"X12", RegId::X12},
-  {"X13", RegId::X13},
-  {"X14", RegId::X14},
-  {"X15", RegId::X15},
-  {"X16", RegId::X16},
-  {"X17", RegId::X17},
-  {"X18", RegId::X18},
-  {"X19", RegId::X19},
-  {"X20", RegId::X20},
-  {"X21", RegId::X21},
-  {"X22", RegId::X22},
-  {"X23", RegId::X23},
-  {"X24", RegId::X24},
-  {"X25", RegId::X25},
-  {"X26", RegId::X26},
-  {"X27", RegId::X27},
-  {"X28", RegId::X28},
-  {"X29", RegId::X29},
-  {"X30", RegId::X30},
-  {"X31", RegId::X31},
-  {"NWID", RegId::NWID},
-  {"CONT", RegId::CONT},
-  {"EQT", RegId::EQT},
-  {"FSCR", RegId::FSCR},
-  {"STATE_PROPERTY", RegId::STATE_PROPERTY},
-  {"LMBASE", RegId::LMBASE},
-  {"OB_0", RegId::OB_0},
-  {"OB_1", RegId::OB_1},
-  {"OB_2", RegId::OB_2},
-  {"OB_3", RegId::OB_3},
-  {"OB_4", RegId::OB_4},
-  {"OB_5", RegId::OB_5},
-  {"OB_6", RegId::OB_6},
-  {"OB_7", RegId::OB_7},
-  {"UDPR_0", RegId::UDPR_0},
-  {"UDPR_1", RegId::UDPR_1},
-  {"UDPR_2", RegId::UDPR_2},
-  {"UDPR_3", RegId::UDPR_3},
-  {"UDPR_4", RegId::UDPR_4},
-  {"UDPR_5", RegId::UDPR_5},
-  {"UDPR_6", RegId::UDPR_6},
-  {"UDPR_7", RegId::UDPR_7},
-  {"UDPR_8", RegId::UDPR_8},
-  {"UDPR_9", RegId::UDPR_9},
-  {"UDPR_10", RegId::UDPR_10},
-  {"UDPR_11", RegId::UDPR_11},
-  {"UDPR_12", RegId::UDPR_12},
-  {"UDPR_13", RegId::UDPR_13},
-  {"UDPR_14", RegId::UDPR_14},
-  {"UDPR_15", RegId::UDPR_15},
-};
+static const std::unordered_map<std::string, RegId>& regNamesMap() {
+  static const auto* map = new std::unordered_map<std::string, RegId>{
+    {"X0", RegId::X0},
+    {"X1", RegId::X1},
+    {"X2", RegId::X2},
+    {"X3", RegId::X3},
+    {"X4", RegId::X4},
+    {"X5", RegId::X5},
+    {"X6", RegId::X6},
+    {"X7", RegId::X7},
+    {"X8", RegId::X8},
+    {"X9", RegId::X9},
+    {"X10", RegId::X10},
+    {"X11", RegId::X11},
+    {"X12", RegId::X12},
+    {"X13", RegId::X13},
+    {"X14", RegId::X14},
+    {"X15", RegId::X15},
+    {"X16", RegId::X16},
+    {"X17", RegId::X17},
+    {"X18", RegId::X18},
+    {"X19", RegId::X19},
+    {"X20", RegId::X20},
+    {"X21", RegId::X21},
+    {"X22", RegId::X22},
+    {"X23", RegId::X23},
+    {"X24", RegId::X24},
+    {"X25", RegId::X25},
+    {"X26", RegId::X26},
+    {"X27", RegId::X27},
+    {"X28", RegId::X28},
+    {"X29", RegId::X29},
+    {"X30", RegId::X30},
+    {"X31", RegId::X31},
+    {"NWID", RegId::NWID},
+    {"CONT", RegId::CONT},
+    {"EQT", RegId::EQT},
+    {"FSCR", RegId::FSCR},
+    {"STATE_PROPERTY", RegId::STATE_PROPERTY},
+    {"LMBASE", RegId::LMBASE},
+    {"OB_0", RegId::OB_0},
+    {"OB_1", RegId::OB_1},
+    {"OB_2", RegId::OB_2},
+    {"OB_3", RegId::OB_3},
+    {"OB_4", RegId::OB_4},
+    {"OB_5", RegId::OB_5},
+    {"OB_6", RegId::OB_6},
+    {"OB_7", RegId::OB_7},
+    {"UDPR_0", RegId::UDPR_0},
+    {"UDPR_1", RegId::UDPR_1},
+    {"UDPR_2", RegId::UDPR_2},
+    {"UDPR_3", RegId::UDPR_3},
+    {"UDPR_4", RegId::UDPR_4},
+    {"UDPR_5", RegId::UDPR_5},
+    {"UDPR_6", RegId::UDPR_6},
+    {"UDPR_7", RegId::UDPR_7},
+    {"UDPR_8", RegId::UDPR_8},
+    {"UDPR_9", RegId::UDPR_9},
+    {"UDPR_10", RegId::UDPR_10},
+    {"UDPR_11", RegId::UDPR_11},
+    {"UDPR_12", RegId::UDPR_12},
+    {"UDPR_13", RegId::UDPR_13},
+    {"UDPR_14", RegId::UDPR_14},
+    {"UDPR_15", RegId::UDPR_15},
+  };
+  return *map;
+}
+
+static RegId REG_NAMES_MAP(const std::string& name) {
+  const auto& map = regNamesMap();
+  const auto it = map.find(name);
+  if (it == map.end()) {
+    BASIM_ERROR("Unknown register name %s", name.c_str());
+    return RegId::X0;
+  }
+  return it->second;
+}
 #endif // __REG_NAMES_MAP__
 
 
@@ -222,7 +234,7 @@ Cycles exeInstPrintPerflog(ArchState& ast, EncInst inst) {
 
       //printf the original format string for up until each reg value, for all reg values
       while (std::getline(ssin, temp_s, ',')) {
-        regval.lu = tst->readReg(REG_NAMES_MAP[temp_s]);
+        regval.lu = tst->readReg(REG_NAMES_MAP(temp_s));
 
         if (typestr[regcount] == "%d" ||typestr[regcount] == "%i") {
           printf((typesubstr[regcount] + "%d").c_str(), regval.i);
@@ -255,7 +267,7 @@ Cycles exeInstPrintPerflog(ArchState& ast, EncInst inst) {
     #else
 
       while (std::getline(ssin, temp_s, ',')) {
-        regvalues[regcount++] = tst->readReg(REG_NAMES_MAP[temp_s]);
+        regvalues[regcount++] = tst->readReg(REG_NAMES_MAP(temp_s));
       }
       f = std::to_string(ast.timestamp) + ": " + "[NWID " + std::to_string(network_id) + "][TID " + std::to_string(thread_id) + "][" + instmem->getSymbolName(tst->getEventWord().getEventLabel()) + "] " + f;
 
@@ -327,7 +339,7 @@ Cycles exeInstPrintPerflog(ArchState& ast, EncInst inst) {
 
     #ifdef ACTIVATE_FP
       while (std::getline(ssin, temp_s, ',')) {
-        regval.lu = tst->readReg(REG_NAMES_MAP[temp_s]);
+        regval.lu = tst->readReg(REG_NAMES_MAP(temp_s));
         if (typestr[regcount] == "%d" ||typestr[regcount] == "%i") {
           std::sprintf(str_buf, (typesubstr[regcount] + "%d").c_str(), regval.i);
         } else if (typestr[regcount] == "%f") {
@@ -352,7 +364,7 @@ Cycles exeInstPrintPerflog(ArchState& ast, EncInst inst) {
     #else
 
       while (std::getline(ssin, temp_s, ',')) {
-        regvalues[regcount++] = tst->readReg(REG_NAMES_MAP[temp_s]);
+        regvalues[regcount++] = tst->readReg(REG_NAMES_MAP(temp_s));
       }
 
       if (regcount == 0) { std::sprintf(str_buf, f.c_str(), ' '); }

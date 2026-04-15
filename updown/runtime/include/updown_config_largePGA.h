@@ -35,25 +35,14 @@
 
 #include <stdint.h>
 
-// Node configuration is controlled in cmake
-// Default is 1 node
-#ifdef NODE64
-#define DEF_NUM_NODES 64          // 64 Node system
-#elif NODE32
-#define DEF_NUM_NODES 32          // 32 Node system
-#elif NODE8
-#define DEF_NUM_NODES 8           // 8 node system
-#else
 #define DEF_NUM_NODES 1           // 1 node system
-#endif
-
 #define DEF_NUM_LANES 64          // Number of lanes per CU
 #define DEF_NUM_UDS 4             // Number of CUs
 #define DEF_NUM_STACKS 8          // Number of Stacks per Node
 #define DEF_SPMEM_BANK_SIZE 65536 // Scratchpad Memory size per lane
 #define DEF_WORD_SIZE 8            // Wordsize
-#define DEF_MAPPED_SIZE 1UL << 38  
-#define DEF_GMAPPED_SIZE 1UL << 32  
+#define DEF_MAPPED_SIZE 1UL << 38
+#define DEF_GMAPPED_SIZE 1UL << 32
 #define DEF_MEM_BLOCK_SIZE 4096    // Memory Block Size
 
 #define DEF_MEM_ISEG_BLOCK_SIZE 4096      // Local Memory Segment Size (B)

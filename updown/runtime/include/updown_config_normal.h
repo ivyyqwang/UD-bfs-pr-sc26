@@ -35,25 +35,14 @@
 
 #include <stdint.h>
 
-// Node configuration is controlled in cmake
-// Default is 1 node
-#ifdef NODE64
-#define DEF_NUM_NODES 64          // 64 Node system
-#elif NODE32
-#define DEF_NUM_NODES 32          // 32 Node system
-#elif NODE8
-#define DEF_NUM_NODES 8           // 8 node system
-#else
 #define DEF_NUM_NODES 1           // 1 node system
-#endif
-
 #define DEF_NUM_LANES 64          // Number of lanes per CU
 #define DEF_NUM_UDS 4             // Number of CUs
 #define DEF_NUM_STACKS 8          // Number of Stacks per Node
 #define DEF_SPMEM_BANK_SIZE 65536 // Scratchpad Memory size per lane
 #define DEF_WORD_SIZE 8            // Wordsize
-#define DEF_MAPPED_SIZE 1UL << 32  
-#define DEF_GMAPPED_SIZE 1UL << 32
+#define DEF_MAPPED_SIZE 1UL << 32
+#define DEF_GMAPPED_SIZE 1UL << 34
 
 #define DEF_MEM_ISEG_BLOCK_SIZE 4096      // Local Memory Segment Size (B)
 #define DEF_INTER_NODE_LATENCY 1100       // Inter Node Latency (cycles)
@@ -61,6 +50,9 @@
 #define DEF_FAR_MEM_EXTRA_LATENCY 0       // Extra Latency for Far Memory (cycles)
 #define DEF_MEM_BANDWIDTH 1200          // Memory Bandwidth (GB/s per Stack), now set to infinite, HBM3e should be 1200
 #define DEF_INTER_NODE_BANDWIDTH 0          // Network Bandwidth (GB/s per node), now set to infinite
+
+#define DEF_MEM_QUEUE_WARNING_RATIO_VS_LITTLE 2 // Warning of memory controller queue size as multiple of little memory queue size; set to 0 to disable
+#define DEF_MEM_QUEUE_WARNING_INTERVAL 2000  // Minimum interval between two warnings for memory controller queue size crossing warning size
 
 // This address space can support 64 nodes
 #ifndef GEM5_MODE

@@ -34,10 +34,10 @@
 #define UPSTREAM_H
 
 // DEFAULT VALUES
+#define DEF_NUM_NODES 1           // Number of Nodes in System
 #define DEF_NUM_LANES 64          // Number of lanes per CU
 #define DEF_NUM_UDS 4             // Number of CUs
 #define DEF_NUM_STACKS 8          // Number of Stacks per Node
-#define DEF_NUM_NODES 1           // Number of Nodes in System
 #define DEF_SPMEM_BANK_SIZE 65536 // Scratchpad Memory size per lane
 #define DEF_WORD_SIZE 8           // Wordsize
 #define DEF_MAPPED_SIZE 1UL << 27

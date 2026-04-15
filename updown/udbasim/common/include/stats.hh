@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include "lanetypes.hh"
+#include "updown_config.h"
 
 namespace basim {
 
@@ -188,7 +189,15 @@ struct LaneStats {
 
 /* UpDown-level stats*/
 struct UDStats {
+    uint64_t outbound_msg_dst_cluster_hist[NUM_STACKS_CAPACITY] = {0};
+    uint64_t outbound_mem_dst_cluster_hist[NUM_STACKS_CAPACITY] = {0};
 
+    void reset(){
+        for(int i = 0; i < NUM_STACKS_CAPACITY; i++){
+            outbound_msg_dst_cluster_hist[i] = 0;
+            outbound_mem_dst_cluster_hist[i] = 0;
+        }
+    }
 };
 
 /* Stack level Stats*/
@@ -208,6 +217,11 @@ struct StackStats{
     uint64_t peak_dram_load_count = 0;
     uint64_t peak_dram_store_count = 0;
     uint64_t peak_dram_load_store_count = 0;
+
+    uint64_t dram_load_word_hist[8] = {0};
+    uint64_t dram_store_word_hist[8] = {0};
+    uint64_t dram_outbound_msg_hist[NUM_STACKS_CAPACITY] = {0};
+
     void reset(){
         dram_load_bytes = 0;
         dram_store_bytes = 0;
@@ -224,6 +238,12 @@ struct StackStats{
         peak_dram_load_count = 0;
         peak_dram_store_count = 0;
         peak_dram_load_store_count = 0;
+
+        for(int i = 0; i < 8; i++){
+            dram_load_word_hist[i] = 0;
+            dram_store_word_hist[i] = 0;
+            dram_outbound_msg_hist[i] = 0;
+        }
     }
 };
 

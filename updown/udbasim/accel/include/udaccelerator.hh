@@ -182,6 +182,12 @@ public:
       return udLanes[lane_id]->getInstCount();
   }        
 #endif
+  void updateMsgTraffic(uint8_t dst_cluster_id, uint32_t pkg_size){
+    udstats->outbound_msg_dst_cluster_hist[dst_cluster_id] += pkg_size;
+  }
+  void updateMemMsgTraffic(uint8_t dst_cluster_id, uint32_t pkg_size){
+    udstats->outbound_mem_dst_cluster_hist[dst_cluster_id] += pkg_size;
+  }
   // Destructor
   ~UDAccelerator();
 };

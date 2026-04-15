@@ -1,7 +1,6 @@
 from Weave.intrinsics import *
 from Weave.helper import isPowerOfTwo, log2
 
-
 class WeaveIRopt:
     @classmethod
     @abstractmethod
@@ -846,7 +845,9 @@ class SplitImmediates(WeaveIRopt):
                 dataType=WeaveIRtypes.i64,
                 quals=[WeaveIRqualifiers.signed],
             )
-            tempDecl, imm = cls.__createLoadImmediate(newImmediate, originalInstr, WeaveIRtypes.i64, assignDecl)
+            tempDecl, imm = cls.__createLoadImmediate(newImmediate, originalInstr, WeaveIRtypes.i64,
+                                                      assignDecl if isinstance(originalInstr, WeaveIRmemory) else None)
+
             newInstr = [imm]
 
             # shift by index positions
@@ -880,7 +881,7 @@ class SplitImmediates(WeaveIRopt):
         return None, []
 
     @classmethod
-    def __getImmediateFieldSize(cls, instr: WeaveIRinstruction) -> int:
+    def __getImmediateFieldSize(cls, instr: WeaveIRinstruction):
         if isinstance(instr, WeaveIRarith):
             return SplitImmediates.ImmediateType.I.value - 1  # immediate is always signed!
         if isinstance(instr, WeaveIRbitwise):
@@ -911,7 +912,7 @@ class SplitImmediates(WeaveIRopt):
 
     @classmethod
     def __createLoadImmediate(cls, immediate: WeaveIRimmediate, originalInstr: WeaveIRinstruction,
-                              dataType: WeaveIRtypes, decl: WeaveIRDecl, shiftInValue=None) -> tuple:
+                              dataType: WeaveIRtypes, decl, shiftInValue=None) -> tuple:
         """
         Creates a load immediate instruction.
         @param immediate: The immediate value to be loaded
@@ -930,15 +931,15 @@ class SplitImmediates(WeaveIRopt):
         @rtype: WeaveIRmemory
         """
 
-        if decl is None:
-            decl = originalInstr.ctx_scope.getTempDeclaration(dataType, originalInstr.quals)
+        if decl is None or not isinstance(originalInstr, WeaveIRmemory):
+            decl = originalInstr.ctx_scope.getTempDeclaration(immediate.dtype, originalInstr.quals)
             decl.setFileLocation(originalInstr.getFileLocation())
         else:
             originalInstr.ctx_scope.getTempRegister(decl)
 
         loadImmediate = WeaveIRmemory(
             ctx=originalInstr.ctx,
-            dataType=dataType,
+            dataType=immediate.dtype,
             opType=WeaveIRmemoryTypes.LOAD,
             ops=[immediate if shiftInValue is None else WeaveIRimmediate(
                 ctx=originalInstr.ctx,
@@ -1336,3 +1337,96 @@ class PhiNodeRemoval(WeaveIRopt):
                     for inst in reversed(originalInsts):
                         if isinstance(inst, WeaveIRphi):
                             originalInsts.remove(inst)
+
+
+class Reg2ImmSendInstruction(WeaveIRopt):
+    @classmethod
+    def getOptName(cls):
+        return "Reg2ImmSendInstruction"
+
+    @classmethod
+    def apply(cls, program: WeaveIRmodule):
+        debugMsg(10, "OPT: Starting check for registers in send instructions")
+        for thr in program.getThreads():
+            for event in thr.getEvents():
+                for bnum, bb in enumerate(event.getBasicBlocks()):
+                    originalInsts = bb.getInstructions()
+                    for inum, inst in reversed(list(enumerate(originalInsts))):
+                        if isinstance(inst, WeaveIRsend):
+                            if not (inst.instType == WeaveIRsendTypes.SEND_DMLM_LD_WRET or
+                                    inst.instType == WeaveIRsendTypes.SEND_DMLM_LD or
+                                    inst.instType == WeaveIRsendTypes.SEND_DMLM or
+                                    inst.instType == WeaveIRsendTypes.SEND_DMLM_WRET or
+                                    inst.instType == WeaveIRsendTypes.SENDOPS_WCONT or
+                                    inst.instType == WeaveIRsendTypes.SENDOPS_WRET or
+                                    inst.instType == WeaveIRsendTypes.SENDOPS_DMLM_WRET or
+                                    inst.instType == WeaveIRsendTypes.SENDMOPS or
+                                    inst.instType == WeaveIRsendTypes.SEND_WRET or
+                                    inst.instType == WeaveIRsendTypes.SEND_WCONT
+                            ):
+                                continue
+
+                            # For the ISA, the length parameter needs to be an immediate. If the length is given in a
+                            # register, create a bunch of if-else branches to cover all possible lengths from 1-8 words.
+                            sizeIndex = inst.getLengthIndex()
+                            length = inst.getInOps()[sizeIndex]
+                            if not isinstance(length, WeaveIRregister):
+                                continue
+
+                            postSection = WeaveIRbasicBlock(event.ctx, event.getLabel("if", "post"))
+
+                            # Move all instructions from the current position to the end of the block to the
+                            # postSection after the if-else branches, except the sendm instruction (`inum+1`)
+                            postSection.instructions = bb.instructions[inum+1:]
+                            bb.instructions[inum:] = []
+                            for e in bb.out_edges:
+                                postSection.addOutEdge(e)
+                            bb.resetOutEdges()
+                            prevBB = bb
+                            curBBInsertIndex = bnum+1
+                            minVal, maxVal = inst.getLengthRange()
+
+                            # First we generate the code for  the maxVal and minVal, because this is probably the
+                            # most used value.
+                            for curLen in [maxVal, minVal] + list(range(maxVal-1, minVal+1, -1)):
+                                trueSection = WeaveIRbasicBlock(event.ctx, event.getLabel("if", "true"))
+                                falseSection = WeaveIRbasicBlock(event.ctx, event.getLabel("if", "false"))
+
+                                imm = WeaveIRimmediate(inst.ctx, val=curLen, dataType=length.dtype, quals=length.quals)
+                                prevBB.addInstruction(WeaveIRbranch(
+                                    ctx=bb.ctx,
+                                    instType=WIRinst.WeaveIRBranchTypes.CONDITIONALNEQ,
+                                    dst_block=falseSection,
+                                    left=length,
+                                    right=imm
+                                ))
+
+                                ops = inst.getInOps()[:sizeIndex]
+                                ops.append(imm)
+                                ops.extend(inst.getInOps()[sizeIndex+1:])
+                                trueSection.addInstruction(WeaveIRsend(event.ctx, inst.instType, ops))
+                                trueSection.addInstruction(WeaveIRbranch(
+                                    ctx=bb.ctx, instType=WIRinst.WeaveIRBranchTypes.UNCONDITIONAL,
+                                    dst_block=postSection,
+                                ))
+
+                                trueSection.addOutEdge(postSection)
+                                postSection.addInEdge(trueSection)
+                                prevBB.addOutEdge(falseSection)
+                                falseSection.addInEdge(prevBB)
+                                prevBB.addOutEdge(trueSection)
+                                trueSection.addInEdge(prevBB)
+
+                                event.basic_blocks.insert(curBBInsertIndex, trueSection)
+                                event.basic_blocks.insert(curBBInsertIndex+1, falseSection)
+
+                                prevBB = falseSection
+                                curBBInsertIndex += 2
+
+                            imm = WeaveIRimmediate(inst.ctx, val=minVal+1, dataType=length.dtype, quals=length.quals)
+                            ops = inst.getInOps()[:sizeIndex]
+                            ops.append(imm)
+                            ops.extend(inst.getInOps()[sizeIndex+1:])
+                            prevBB.addInstruction(WeaveIRsend(event.ctx, inst.instType, ops))
+
+                            event.basic_blocks.insert(curBBInsertIndex, postSection)

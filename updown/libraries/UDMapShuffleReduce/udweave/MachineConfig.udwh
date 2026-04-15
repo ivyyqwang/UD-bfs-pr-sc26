@@ -1,0 +1,14 @@
+#define WORD_SIZE             8
+#define LOG2_WORD_SIZE        3
+
+#define LANE_PER_UD           64
+#define UD_PER_NODE           32
+#define LOG2_LANE_PER_UD      8
+#define LOG2_UD_PER_NODE      5
+#define MAX_NUM_NODES         16384
+#define LMSIZE                65536
+
+#define FLAG                  1
+
+#define DRAM_MSG_SIZE         8
+#define LANE_MSG_SIZE         8

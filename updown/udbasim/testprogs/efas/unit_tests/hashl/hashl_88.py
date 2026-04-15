@@ -1,0 +1,48 @@
+from EFA_v2 import *
+def hashl_88():
+    efa = EFA([])
+    efa.code_level = "machine"
+    state = State()
+    efa.add_initId(state.state_id)
+    efa.add_state(state)
+    event_map = {
+        "launch_events": 0,
+    }
+    tran0 = state.writeTransition("eventCarry", state, state, event_map['launch_events'])
+# Input arguments: [3746961173435997879, 5101305005455847784, -5260182044867740337, 6125570628197381370, 3386459062892626127]
+    tran0.writeAction("addi X7 X16 0")
+    tran0.writeAction("movir X17 13311")
+    tran0.writeAction("slorii X17 X17 12 3605")
+    tran0.writeAction("slorii X17 X17 12 1473")
+    tran0.writeAction("slorii X17 X17 12 3413")
+    tran0.writeAction("slorii X17 X17 12 3767")
+    tran0.writeAction("movrl X17 0(X16) 1 8")
+    tran0.writeAction("movir X17 18123")
+    tran0.writeAction("slorii X17 X17 12 1949")
+    tran0.writeAction("slorii X17 X17 12 4069")
+    tran0.writeAction("slorii X17 X17 12 483")
+    tran0.writeAction("slorii X17 X17 12 360")
+    tran0.writeAction("movrl X17 0(X16) 1 8")
+    tran0.writeAction("movir X17 46848")
+    tran0.writeAction("slorii X17 X17 12 324")
+    tran0.writeAction("slorii X17 X17 12 3265")
+    tran0.writeAction("slorii X17 X17 12 3155")
+    tran0.writeAction("slorii X17 X17 12 3407")
+    tran0.writeAction("movrl X17 0(X16) 1 8")
+    tran0.writeAction("movir X17 21762")
+    tran0.writeAction("slorii X17 X17 12 1632")
+    tran0.writeAction("slorii X17 X17 12 2076")
+    tran0.writeAction("slorii X17 X17 12 1111")
+    tran0.writeAction("slorii X17 X17 12 1274")
+    tran0.writeAction("movrl X17 0(X16) 1 8")
+    tran0.writeAction("addi X7 X16 0")
+    tran0.writeAction("movir X17 12031")
+    tran0.writeAction("slorii X17 X17 12 489")
+    tran0.writeAction("slorii X17 X17 12 850")
+    tran0.writeAction("slorii X17 X17 12 480")
+    tran0.writeAction("slorii X17 X17 12 207")
+    tran0.writeAction("hashl X16 X17 4")
+    tran0.writeAction("addi X7 X16 0")
+    tran0.writeAction("movrl X17 0(X16) 0 8")
+    tran0.writeAction("yieldt")
+    return efa

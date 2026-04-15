@@ -576,8 +576,14 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
   regval_t xs = tst->readReg(extrInstFcnvt_64_i64Xs(inst));
   regval_t old_xs = xs;
   
+  const uint64_t fp64 = 1ULL;
+  const uint64_t fp32 = 2ULL;
+  const uint64_t bf16 = 3ULL;
+  const uint64_t i64 = 6ULL;
+  const uint64_t i32 = 7ULL;
+
   switch ((extrInstFcnvt_64_i64Precision(inst) << 3) | extrInstFcnvt_64_i64Func(inst)) {
-    case 8: {
+    case ((fp64<<3) | i64): {
       // fcnvt.64.i64  Xs, Xd
       int64_t result = *reinterpret_cast<double *>(&xs);
       double t_xs = result;
@@ -595,7 +601,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 16: {
+    case ((fp32<<3) | i32): {
       // fcnvt.32.i32  Xs, Xd
       int32_t result = *reinterpret_cast<float *>(&xs);
       float t_xs = result;
@@ -613,7 +619,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 48: {
+    case ((i64<<3) | fp64): {
       // fcnvt.i64.64  Xs, Xd
       double result = static_cast<int64_t>(xs);
       int64_t t_xs = result;
@@ -638,7 +644,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 56: {
+    case ((i32<<3) | fp32): {
       // fcnvt.i32.32  Xs, Xd
       float result = static_cast<int32_t>(xs & 0x00000000FFFFFFFF);
       int32_t t_xs = result;
@@ -663,7 +669,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 9: {
+    case ((fp64<<3) | fp32): {
       // fcnvt.64.32 Xs, Xd
       float result = *reinterpret_cast<double *>(&xs);
       double t_xs = result;
@@ -688,7 +694,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 10: {
+    case ((fp64<<3) | bf16): {
       // fcnvt.64.b16 Xs, Xd
       float result = BF16ToFloat(floatToBF16(*reinterpret_cast<double *>(&xs)));
       double t_xs = result;
@@ -713,7 +719,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 17: {
+    case ((fp32<<3) | fp64): {
       // fcnvt.32.64 Xs, Xd
       double result = *reinterpret_cast<float *>(&xs);
       float t_xs = result;
@@ -738,7 +744,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 18: {
+    case ((fp32<<3) | bf16): {
       // fcnvt.32.b16 Xs, Xd
       float result = BF16ToFloat(floatToBF16(*reinterpret_cast<float *>(&xs)));
       float t_xs = result;
@@ -763,7 +769,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
       break;
     }
-    case 25: {
+    case ((bf16<<3) | fp64): {
       // fcnvt.b16.64 Xs, Xd
       double result = BF16ToFloat(xs);
       float t_xs = result;
@@ -788,7 +794,7 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
       
       break;
     }
-    case 26: {
+    case ((bf16<<3) | fp32): {
       // fcnvt.b16.32 Xs, Xd
       float result = BF16ToFloat(xs);
       float t_xs = result;
@@ -836,35 +842,42 @@ Cycles exeInstFcnvt(ArchState& ast, EncInst inst) {
 
 std::string disasmInstFcnvt(EncInst inst) {
   std::string disasm_str;
+
+  const uint64_t fp64 = 1ULL;
+  const uint64_t fp32 = 2ULL;
+  const uint64_t bf16 = 3ULL;
+  const uint64_t i64 = 6ULL;
+  const uint64_t i32 = 7ULL;
+
   switch ((extrInstFcnvt_64_i64Precision(inst) << 3) | extrInstFcnvt_64_i64Func(inst)) {
-  case 8:
+  case ((fp64<<3) | i64):
     disasm_str += "FCNVT.64.I64";
     break;
-  case 16:
+  case ((fp32<<3) | i32):
     disasm_str += "FCNVT.32.I32";
     break;
-  case 48:
+  case ((i64<<3) | fp64):
     disasm_str += "FCNVT.I64.64";
     break;
-  case 56:
+  case ((i32<<3) | fp32):
     disasm_str += "FCNVT.I32.32";
     break;
-  case 9:
+  case ((fp64<<3) | fp32):
     disasm_str += "FCNVT.64.32";
     break;
-  case 10:
+  case ((fp64<<3) | bf16):
     disasm_str += "FCNVT.64.B16";
     break;
-  case 17:
+  case ((fp32<<3) | fp64):
     disasm_str += "FCNVT.32.64";
     break;
-  case 18:
+  case ((fp32<<3) | bf16):
     disasm_str += "FCNVT.32.B16";
     break;
-  case 25:
+  case ((bf16<<3) | fp64):
     disasm_str += "FCNVT.B16.64";
     break;
-  case 26:
+  case ((bf16<<3) | fp32):
     disasm_str += "FCNVT.B16.32";
     break;
   default:

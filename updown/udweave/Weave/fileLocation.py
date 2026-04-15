@@ -27,23 +27,24 @@ class FileContent:
             new_line = {}
             if len(line) > 1 and line[0] == "#":
                 vals = line.split()
-                if len(vals) > 3 and (vals[3] == "1" or vals[3] == "2"):
-                    curFileName = vals[2].replace('"', "")
-                if len(vals) > 2:
-                    curLineNumber = int(vals[1])
+                curLineNumber = int(vals[1])
+                curFileName = vals[2].replace('"', "")
                 count += len(line) + 1
                 continue
             new_line["content"] = line
             new_line["file_name"] = curFileName
             new_line["line_number"] = curLineNumber
             new_line["firstLoc"] = count
-            curLineNumber += 1
-            count += len(line) + 1
+
             if curFileName not in self._files:
                 self._files[curFileName] = []
             while len(self._files[curFileName]) <= curLineNumber:
+                # insert empty spaces, if the program contains just newlines
                 self._files[curFileName].append({"content": "", "file_name": "", "line_number": len(self._files[curFileName]), "firstLoc": 0})
             self._files[curFileName][curLineNumber] = new_line
+
+            curLineNumber += 1
+            count += len(line) + 1
 
     def getFileContent(self):
         """Returns the file content"""

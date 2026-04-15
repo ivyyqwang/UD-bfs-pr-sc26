@@ -1,7 +1,7 @@
 from linker.EFAProgram import EFAProgram
 
 from LinkableGlobalSync import Broadcast
-from libraries.UDMapShuffleReduce.linkable.LinkableKeyValueSetTPL import KeyValueSetInterface
+from LinkableKeyValueSetTPL import KeyValueSetInterface
 from KVMSRMachineConfig import WORD_SIZE, LOG2_WORD_SIZE, OB_REG_BASE
 from math import log2
 from Macro import *

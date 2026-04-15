@@ -6,6 +6,7 @@ include_directories(BEFORE
   ../../common/include
   ../common/include
   ../isa/include
+  ../../runtime/include
 )
 
 add_library(LaneElements SHARED 

@@ -7,6 +7,7 @@ include_directories(BEFORE
   ../isa/include
   ../lane/include
   ../accel/include
+  ../../runtime/include
 )
 
 #add_library(BASimElements src/basim.cpp)

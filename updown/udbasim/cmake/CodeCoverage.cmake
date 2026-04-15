@@ -168,7 +168,7 @@ ENDFUNCTION() # SETUP_TARGET_FOR_COVERAGE
 # Param _outputname     cobertura output is generated as _outputname.xml
 # Optional fourth parameter is passed as arguments to _testrunner
 #   Pass them in list form, e.g.: "-j;2" for -j 2
-FUNCTION(SETUP_TARGET_FOR_COVERAGE_COBERTURA _targetname _testrunner _outputname)
+FUNCTION(Python3_EXECUTABLE _targetname _testrunner _outputname)
 
 	IF(NOT PYTHON_EXECUTABLE)
 		MESSAGE(FATAL_ERROR "Python not found! Aborting...")

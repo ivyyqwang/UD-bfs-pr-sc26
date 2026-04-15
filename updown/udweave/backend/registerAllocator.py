@@ -143,7 +143,7 @@ class WeaveSimpleRegAlloc(WeaveRegisterAllocator):
 
     def recursiveTypeReg(self, ty: AllocRegTypes, thread: bool) -> None:
         for field in ty.getFields():
-            if isinstance(field, WeaveIRstructDecl):
+            if isinstance(field, WeaveIRStructTypeDecl):
                 self.recursiveTypeReg(field, thread)
             elif not isinstance(field, WeaveIRpadding):
                 val = self.getReg(field.getRegs[0])
@@ -273,10 +273,6 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
         errorMsg(f"Event {event} not found in the register allocator")
 
     def allocate(self, scope: WeaveIRscope) -> None:
-        """
-        @TODO ensure that this is called for the scope that has the thread inside
-        @TODO after that, the self.used etc attributes need to be reset.
-        """
         # This assumes SSA form. The allocation fails if there are no more registers.
         # Thread local variables are kept across events
         # Single allocation and propagate to all instructions
@@ -352,6 +348,10 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
         decls = event.ctx_scope.getAllNestedDeclarations()
         insts = self.flattenBB(event)
         for inst in insts:
+            if inst.getFileLocation() is None:
+                debugMsg(6, inst.to_string(0))
+            else:
+                debugMsg(6, f"{inst.getFileLocation().getLine()}") #: {inst}")
             if isinstance(inst, WeaveIRassembly):
                 for op in inst.getInOps():
                     decl = op.varName
@@ -363,12 +363,13 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
                         reg = self.getGPR(inst, event)
                         reg.setLastUsedInstr(lastInstruction)
                         decl.updateVirtualRegs(virtualRegs, reg)
-                        debugMsg(6, f"Instruction: {inst}, last read: {lastInstruction}, "
-                                    f"allocating {reg.name} (event: {event.name}")
+                        debugMsg(6, f"\tallocating {reg.name} - last read: "
+                                    f"{lastInstruction.getFileLocation().getLine()}")
                 self.releaseUsedRegisters(event, inst, decls)
 
             elif isinstance(inst, WeaveIRinstruction):
                 if inst.getReturnReg():
+                    self.releaseUsedRegisters(event, inst, decls)
                     if not inst.getReturnReg().alreadyAllocated:
                         # find the associated declaration
                         decl = inst.getReturnReg().getDecl()
@@ -389,15 +390,15 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
                             reg = self.getGPR(inst, event)
                             reg.setLastUsedInstr(lastInstruction)
                             decl.updateVirtualRegs(virtualRegs, reg)
-                            debugMsg(6, f"Instruction: {inst}, last read: {lastInstruction}, "
-                                        f"allocating {reg.name} (event: {event.name}")
+                            debugMsg(6, f"\tallocating {reg.name} for {decl.name} - last read: "
+                                        f"{lastInstruction.getFileLocation().getLine()}")
 
                 # inst might be an intrinsic function or a store to memory. Both do not return anything
                 else:
                     for op in inst.getInOps():
                         # For intrinsic functions, the operand must have been initialized earlier.
                         # However, an exception is to be made, if event labels are used as operands. In this case, a
-                        # temporary register is to be assigned and it is normal, that it is not initialized.
+                        # temporary register is to be assigned, and it is normal, that it is not initialized.
                         # If not, echo a warning and assign a register temporary, which is essentially freed immediately
                         # after the instruction.
                         if isinstance(op, WeaveIRregister) and not op.alreadyAllocated:
@@ -408,8 +409,7 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
                             reg = self.getGPR(inst, event)
                             reg.setLastUsedInstr(inst)
                             decl.updateVirtualRegs({op}, reg)
-
-                self.releaseUsedRegisters(event, inst, decls)
+                    self.releaseUsedRegisters(event, inst, decls)
 
     def releaseUsedRegisters(self, event: WeaveIRevent, inst: WeaveIRinstruction, decls: list) -> None:
         for reg in reversed(self._used):
@@ -419,7 +419,7 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
                     if decl.getPhysicalReg() is not None and decl.getPhysicalReg() == reg:
                         decl.setPhysicalReg(None)
                         debugMsg(6,
-                                 f"Deallocating {reg.name} from {decl.name} in scope {event.name}")
+                                 f"\tdeallocating {reg.name} from {decl.name}")
                         break
 
     def lastInstruction(self, event: WeaveIRevent, currentDecl: WeaveIRDecl,
@@ -465,14 +465,18 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
                         readDecl = op.getDecl()
                         if readDecl and readDecl == currentDecl:
                             lastInstruction = inst
-                            lastInstructionWrite = False
-
-                            # The instruction might also write to the current declaration
-                            # for instance, in `j = j + 1`
-                            hasBeenRead = True
+                            if isinstance(inst, WeaveIRmemory):
+                                if inst.instType == WIRinst.WeaveIRmemoryTypes.LOADLOCAL:
+                                    lastInstructionWrite = True
+                                    hasBeenRead = False
+                                else:
+                                    # The instruction might also write to the current declaration
+                                    # for instance, in `j = j + 1`
+                                    lastInstructionWrite = False
+                                    hasBeenRead = True
                             break
 
-                    elif isinstance(op, WeaveIRbinaryOps):
+                    elif isinstance(op, WeaveIRinstruction):
                         returnReg: WeaveIRregister = op.getReturnReg()
                         if returnReg:
                             readDecl = returnReg.getDecl()
@@ -503,8 +507,11 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
                 if not hasBeenRead and inst.getReturnReg() is not None:
                     decl = inst.getReturnReg().getDecl()
                     if decl and decl == currentDecl:
-                        lastInstruction = inst
-                        lastInstructionWrite = True
+                        if lastInstruction is None:
+                            lastInstruction = inst
+                            lastInstructionWrite = True
+                        # else:
+                        #     return lastInstruction, lastInstructionWrite
 
         return lastInstruction, lastInstructionWrite
 
@@ -538,15 +545,24 @@ class WeaveLifetimeRegAlloc(WeaveRegisterAllocator):
         virtualRegs = set()
         insts = self.getInstrRange(event, upperBoundInstr, lowerBoundInstr, False, True)
 
+        # The declaration could be part of a union or struct. If it is a union, then the register is the same
+        # across multiple fields. Hence, we collect all registers used by the union.
+        declRegs = []
+        if isinstance(decl.unionStructDecl, WeaveIRUnionTypeDecl):
+            for field in decl.unionStructDecl.getFields():
+                declRegs.extend(field.getRegs)
+        else:
+            declRegs = decl.getRegs
+
         for inst in insts:
             if isinstance(inst, WeaveIRinstruction):
                 reg = inst.getReturnReg()
-                if reg is not None and reg in decl.getRegs:
-                    virtualRegs.add(inst.getReturnReg())
+                if reg is not None and reg in declRegs:
+                    virtualRegs.add(reg)
                 for op in inst.getInOps():
-                    if isinstance(op, WeaveIRregister) and op in decl.getRegs:
+                    if isinstance(op, WeaveIRregister) and op in declRegs:
                         virtualRegs.add(op)
-                    elif isinstance(op, WeaveIRbinaryOps) and op.getReturnReg() in decl.getRegs:
+                    elif isinstance(op, WeaveIRbinaryOps) and op.getReturnReg() in declRegs:
                         virtualRegs.add(op.getReturnReg())
                     elif isinstance(op, WeaveIRDecl) and op == decl:
                         virtualRegs.add(op.getAsOperand())

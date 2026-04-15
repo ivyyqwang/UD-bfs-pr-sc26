@@ -53,8 +53,10 @@ class LMCache():
         self.cache_entry_bsize  = entry_size << LOG2_WORD_SIZE
         self.key_size       = key_size
         self.value_size     = entry_size - key_size
-        self.power_of_two_cache_size = int(log2(self.cache_size)) != log2(self.cache_size)
-        self.power_of_two_entry_size = int(log2(self.cache_entry_size)) != log2(self.cache_entry_size)
+        self.power_of_two_cache_size = int(log2(self.cache_size)) == log2(self.cache_size)
+        self.power_of_two_entry_size = int(log2(self.cache_entry_size)) == log2(self.cache_entry_size)
+        print(f"[LMCache][{self.id}] Cache initialized with size = {self.cache_size}, entry size = {self.cache_entry_size}, key size = {self.key_size}, " +
+              f"cache_offset = {self.cache_offset}, power_of_two_cache_size = {self.power_of_two_cache_size}, power_of_two_entry_size = {self.power_of_two_entry_size}")
 
         self.max_active_threads = max_active_threads if max_active_threads > 0 else num_entries
         
@@ -74,8 +76,10 @@ class LMCache():
         self.data_store.setup_kvset(state, lm_offset=self.max_threads_offset + WORD_SIZE, send_buffer_offset=self.send_buffer_offset, debug_flag=debug_flag)
         
         self.debug_flag         = debug_flag
-        self.print_level        = 4
+        self.print_level        = 2
         self.wf4k4_patch_flag   = wf4k4_patch_flag
+        if self.debug_flag:
+            print(f"[LMCache][{self.id}] Debug print enabled")
         
         self.cache_stats_flag   = cache_stats_flag
         
@@ -203,7 +207,15 @@ class LMCache():
             ln_cache_init_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Initialize scratchpad cache base addr = %ld(0x%lx) " + 
                                            f"initial value = %ld' {'X0'} {cache_base} {cache_base} {ival}")
         ln_cache_init_tran.writeAction(f"mov_imm2reg {init_ctr} 0")
-        ln_cache_init_tran.writeAction(f"{cache_init_loop_label}: movwrl {ival} {cache_base}({init_ctr},1,{int(log2(self.cache_entry_size))})")
+        if self.power_of_two_entry_size:
+            ln_cache_init_tran.writeAction(f"{cache_init_loop_label}: movwrl {ival} {cache_base}({init_ctr},1,{int(log2(self.cache_entry_size))})")
+        else:
+            ln_cache_init_tran.writeAction(f"{cache_init_loop_label}: movrl {ival} 0({cache_base}) 0 8")
+            ln_cache_init_tran.writeAction(f"addi {init_ctr} {init_ctr} 1")
+            ln_cache_init_tran.writeAction(f"addi {cache_base} {cache_base} {self.cache_entry_bsize}")
+            if self.debug_flag and self.print_level > 5:
+                ln_cache_init_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Init cache entry %ld at addr = %lu(0x%lx) with value = %ld' " +
+                                               f"{'X0'} {init_ctr} {cache_base} {cache_base} {ival}")
         ln_cache_init_tran.writeAction(f"blt {init_ctr} {num_entries} {cache_init_loop_label}")
         ln_cache_init_tran.writeAction(f"sendr_reply X0 X16 X17")
         ln_cache_init_tran.writeAction("yield_terminate")

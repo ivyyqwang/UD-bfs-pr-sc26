@@ -77,6 +77,24 @@ public:
     void insertGlobalTrans(uint64_t virtual_base, uint64_t physical_base, uint64_t size, uint64_t swizzle_mask, uint8_t permission);
 
     /**
+     * @brief Clear all translation entries
+     * 
+     */
+    void clearAllTrans();
+
+    /**
+     * @brief Remove a local translation entry
+     * 
+     */
+    void removeLocalTrans(uint64_t virtual_base);
+
+    /**
+     * @brief Remove a global translation entry
+     * 
+     */
+    void removeGlobalTrans(uint64_t virtual_base);
+    
+    /**
      * @brief Validate and translate virtual Address to DRAM Address
      * 
      */

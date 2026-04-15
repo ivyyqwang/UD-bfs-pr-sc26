@@ -62,7 +62,7 @@ struct BASimStats {
 };
 
 struct BASimNodeStats {
-  std::vector<std::shared_ptr<std::atomic<uint64_t>>> output_bytes;
+  std::shared_ptr<std::atomic<uint64_t>> output_bytes;
 
   #if defined(NETWORK_STATS)
   std::vector<std::shared_ptr<std::atomic<uint64_t>>> tran_count_other_node;
@@ -116,12 +116,15 @@ struct BASimNodeStats {
   std::vector<std::vector<std::shared_ptr<std::atomic<uint64_t>>>> dram_store_packet_size_other_node_histogram;
   std::vector<std::vector<std::shared_ptr<std::atomic<uint64_t>>>> dram_store_ack_packet_size_other_node_histogram;
   std::vector<std::vector<std::shared_ptr<std::atomic<uint64_t>>>> total_packet_size_other_node_histogram;
+
+  std::vector<std::shared_ptr<std::atomic<uint64_t>>> network_bandwdith_histogram;
+  std::vector<std::shared_ptr<std::atomic<uint64_t>>> packet_rate_histogram;
+  std::vector<std::shared_ptr<std::atomic<double>>> traffic_timeline;
+  std::vector<std::shared_ptr<std::atomic<double>>> packet_timeline;
   #endif
 
   void initialize_histogram(std::vector<std::vector<std::shared_ptr<std::atomic<uint64_t>>>>& vec, size_t rows, size_t cols) {
-    vec.clear();   
     vec.resize(rows);
-
     for (auto& row : vec) {
         row.reserve(cols);  
         for (size_t i = 0; i < cols; ++i) {
@@ -130,77 +133,84 @@ struct BASimNodeStats {
     }
   }
 
-  void reset_tmp(int size){
-    auto initialize_vector = [size](std::vector<std::shared_ptr<std::atomic<uint64_t>>>& vec) {
-      vec.clear();
-      vec.reserve(size);
-      for (int i = 0; i < size; ++i) {
-        vec.emplace_back(std::make_shared<std::atomic<uint64_t>>(0));
+  /**
+   * @brief Reset the temporary node statistics.
+   */
+  void reset_tmp() {
+    auto reset_vector = [](std::vector<std::shared_ptr<std::atomic<uint64_t>>>& vec) {
+      for(auto &value : vec) {
+        *value = 0; // non atomic!
       }
-
     };
-
-    initialize_vector(output_bytes);
+   
+    *output_bytes = 0; // non atomic!
     #if defined(NETWORK_STATS)
-    initialize_vector(max_total_count_other_node_tmp);
-    initialize_vector(max_total_bytes_other_node_tmp);
-    initialize_vector(max_tran_count_other_node_tmp);
-    initialize_vector(max_tran_bytes_other_node_tmp);
-    initialize_vector(max_dram_store_count_other_node_tmp);
-    initialize_vector(max_dram_load_count_other_node_tmp);
-    initialize_vector(max_dram_store_bytes_other_node_tmp);
-    initialize_vector(max_dram_load_bytes_other_node_tmp);
-    initialize_vector(max_dram_store_ack_count_other_node_tmp);
-    initialize_vector(max_dram_load_ack_count_other_node_tmp);
-    initialize_vector(max_dram_store_ack_bytes_other_node_tmp);
-    initialize_vector(max_dram_load_ack_bytes_other_node_tmp);
-    initialize_vector(output_counts);
-    initialize_vector(max_queue_size_tmp);
+    reset_vector(max_total_count_other_node_tmp);
+    reset_vector(max_total_bytes_other_node_tmp);
+    reset_vector(max_tran_count_other_node_tmp);
+    reset_vector(max_tran_bytes_other_node_tmp);
+    reset_vector(max_dram_store_count_other_node_tmp);
+    reset_vector(max_dram_load_count_other_node_tmp);
+    reset_vector(max_dram_store_bytes_other_node_tmp);
+    reset_vector(max_dram_load_bytes_other_node_tmp);
+    reset_vector(max_dram_store_ack_count_other_node_tmp);
+    reset_vector(max_dram_load_ack_count_other_node_tmp);
+    reset_vector(max_dram_store_ack_bytes_other_node_tmp);
+    reset_vector(max_dram_load_ack_bytes_other_node_tmp);
+    reset_vector(output_counts);
+    reset_vector(max_queue_size_tmp);
     #endif
-
   }
 
-  // Initialize the vectors with the given size and set atomic values to 0
-  void reset(int size) {
-    auto initialize_vector = [size](std::vector<std::shared_ptr<std::atomic<uint64_t>>>& vec) {
-      vec.clear();
-      vec.reserve(size);
+  /**
+   * @brief Initialize the vectors with the given size and set atomic values to 0.
+   * Do not use this method to reset the values, it will be too costly.
+   */
+  void initialize(int size) {
+    auto initialize_vector = []<typename T>(std::vector<std::shared_ptr<std::atomic<T>>>& vec, int size) {
       for (int i = 0; i < size; ++i) {
-        vec.emplace_back(std::make_shared<std::atomic<uint64_t>>(0));
+        vec.emplace_back(std::make_shared<std::atomic<T>>(0));
       }
     };
 
+    output_bytes = std::make_shared<std::atomic<uint64_t>>(0);
+
     #if defined(NETWORK_STATS)
-    initialize_vector(max_bytes);
-    initialize_vector(max_counts);
-    initialize_vector(max_queue_size);
-    initialize_vector(total_queue_size);
+    initialize_vector(max_bytes, size);
+    initialize_vector(max_counts, size);
+    initialize_vector(max_queue_size, size);
+    initialize_vector(total_queue_size, size);
 
-    initialize_vector(total_count_other_node);
-    initialize_vector(total_bytes_other_node);
-    initialize_vector(tran_count_other_node);
-    initialize_vector(tran_bytes_other_node);
-    initialize_vector(dram_store_count_other_node);
-    initialize_vector(dram_load_count_other_node);
-    initialize_vector(dram_store_bytes_other_node);
-    initialize_vector(dram_load_bytes_other_node);
-    initialize_vector(dram_store_ack_count_other_node);
-    initialize_vector(dram_load_ack_count_other_node);
-    initialize_vector(dram_store_ack_bytes_other_node);
-    initialize_vector(dram_load_ack_bytes_other_node);
+    initialize_vector(total_count_other_node, size);
+    initialize_vector(total_bytes_other_node, size);
+    initialize_vector(tran_count_other_node, size);
+    initialize_vector(tran_bytes_other_node, size);
+    initialize_vector(dram_store_count_other_node, size);
+    initialize_vector(dram_load_count_other_node, size);
+    initialize_vector(dram_store_bytes_other_node, size);
+    initialize_vector(dram_load_bytes_other_node, size);
+    initialize_vector(dram_store_ack_count_other_node, size);
+    initialize_vector(dram_load_ack_count_other_node, size);
+    initialize_vector(dram_store_ack_bytes_other_node, size);
+    initialize_vector(dram_load_ack_bytes_other_node, size);
 
-    initialize_vector(max_total_count_other_node);
-    initialize_vector(max_total_bytes_other_node);
-    initialize_vector(max_tran_count_other_node);
-    initialize_vector(max_tran_bytes_other_node);
-    initialize_vector(max_dram_store_count_other_node);
-    initialize_vector(max_dram_load_count_other_node);
-    initialize_vector(max_dram_store_bytes_other_node);
-    initialize_vector(max_dram_load_bytes_other_node);
-    initialize_vector(max_dram_store_ack_count_other_node);
-    initialize_vector(max_dram_load_ack_count_other_node);
-    initialize_vector(max_dram_store_ack_bytes_other_node);
-    initialize_vector(max_dram_load_ack_bytes_other_node);
+    initialize_vector(max_total_count_other_node, size);
+    initialize_vector(max_total_bytes_other_node, size);
+    initialize_vector(max_tran_count_other_node, size);
+    initialize_vector(max_tran_bytes_other_node, size);
+    initialize_vector(max_dram_store_count_other_node, size);
+    initialize_vector(max_dram_load_count_other_node, size);
+    initialize_vector(max_dram_store_bytes_other_node, size);
+    initialize_vector(max_dram_load_bytes_other_node, size);
+    initialize_vector(max_dram_store_ack_count_other_node, size);
+    initialize_vector(max_dram_load_ack_count_other_node, size);
+    initialize_vector(max_dram_store_ack_bytes_other_node, size);
+    initialize_vector(max_dram_load_ack_bytes_other_node, size);
+
+    initialize_vector(network_bandwdith_histogram, 1000);
+    initialize_vector(packet_rate_histogram, 1000);
+    initialize_vector(traffic_timeline, 1000);
+    initialize_vector(packet_timeline, 1000);
 
     initialize_histogram(total_packet_size_other_node_histogram, size, 12);
     initialize_histogram(tran_packet_size_other_node_histogram, size, 12);
@@ -208,6 +218,102 @@ struct BASimNodeStats {
     initialize_histogram(dram_load_ack_packet_size_other_node_histogram, size, 12);
     initialize_histogram(dram_store_packet_size_other_node_histogram, size, 12);
     initialize_histogram(dram_store_ack_packet_size_other_node_histogram, size, 12);
+
+    initialize_vector(max_total_count_other_node_tmp, size);
+    initialize_vector(max_total_bytes_other_node_tmp, size);
+    initialize_vector(max_tran_count_other_node_tmp, size);
+    initialize_vector(max_tran_bytes_other_node_tmp, size);
+    initialize_vector(max_dram_store_count_other_node_tmp, size);
+    initialize_vector(max_dram_load_count_other_node_tmp, size);
+    initialize_vector(max_dram_store_bytes_other_node_tmp, size);
+    initialize_vector(max_dram_load_bytes_other_node_tmp, size);
+    initialize_vector(max_dram_store_ack_count_other_node_tmp, size);
+    initialize_vector(max_dram_load_ack_count_other_node_tmp, size);
+    initialize_vector(max_dram_store_ack_bytes_other_node_tmp, size);
+    initialize_vector(max_dram_load_ack_bytes_other_node_tmp, size);
+    initialize_vector(output_counts, size);
+    initialize_vector(max_queue_size_tmp, size);
+    #endif
+  }
+
+
+  /**
+   * @brief Reset the vectors with the given size and set atomic values to 0.
+   */
+  void reset() {
+    auto reset_vector = []<typename T>(std::vector<std::shared_ptr<std::atomic<T>>>& vec) {
+      for(auto &value : vec) {
+        *value = (T)0; // non atomic!
+      }
+    };
+
+    auto reset_histogram = []<typename T>(std::vector<std::vector<std::shared_ptr<std::atomic<T>>>>& vec) {
+      for(auto &row : vec) {
+        for(auto &col : row) {
+          *col = (T)0; // non atomic!
+        }
+      }
+    };
+
+
+    #if defined(NETWORK_STATS)
+    reset_vector(max_bytes);
+    reset_vector(max_counts);
+    reset_vector(max_queue_size);
+    reset_vector(total_queue_size);
+
+    reset_vector(total_count_other_node);
+    reset_vector(total_bytes_other_node);
+    reset_vector(tran_count_other_node);
+    reset_vector(tran_bytes_other_node);
+    reset_vector(dram_store_count_other_node);
+    reset_vector(dram_load_count_other_node);
+    reset_vector(dram_store_bytes_other_node);
+    reset_vector(dram_load_bytes_other_node);
+    reset_vector(dram_store_ack_count_other_node);
+    reset_vector(dram_load_ack_count_other_node);
+    reset_vector(dram_store_ack_bytes_other_node);
+    reset_vector(dram_load_ack_bytes_other_node);
+
+    reset_vector(max_total_count_other_node);
+    reset_vector(max_total_bytes_other_node);
+    reset_vector(max_tran_count_other_node);
+    reset_vector(max_tran_bytes_other_node);
+    reset_vector(max_dram_store_count_other_node);
+    reset_vector(max_dram_load_count_other_node);
+    reset_vector(max_dram_store_bytes_other_node);
+    reset_vector(max_dram_load_bytes_other_node);
+    reset_vector(max_dram_store_ack_count_other_node);
+    reset_vector(max_dram_load_ack_count_other_node);
+    reset_vector(max_dram_store_ack_bytes_other_node);
+    reset_vector(max_dram_load_ack_bytes_other_node);
+
+    reset_vector(network_bandwdith_histogram);
+    reset_vector(packet_rate_histogram);
+    reset_vector(traffic_timeline);
+    reset_vector(packet_timeline);
+
+    reset_histogram(total_packet_size_other_node_histogram);
+    reset_histogram(tran_packet_size_other_node_histogram);
+    reset_histogram(dram_load_packet_size_other_node_histogram);
+    reset_histogram(dram_load_ack_packet_size_other_node_histogram);
+    reset_histogram(dram_store_packet_size_other_node_histogram);
+    reset_histogram(dram_store_ack_packet_size_other_node_histogram);
+
+    reset_vector(max_total_count_other_node_tmp);
+    reset_vector(max_total_bytes_other_node_tmp);
+    reset_vector(max_tran_count_other_node_tmp);
+    reset_vector(max_tran_bytes_other_node_tmp);
+    reset_vector(max_dram_store_count_other_node_tmp);
+    reset_vector(max_dram_load_count_other_node_tmp);
+    reset_vector(max_dram_store_bytes_other_node_tmp);
+    reset_vector(max_dram_load_bytes_other_node_tmp);
+    reset_vector(max_dram_store_ack_count_other_node_tmp);
+    reset_vector(max_dram_load_ack_count_other_node_tmp);
+    reset_vector(max_dram_store_ack_bytes_other_node_tmp);
+    reset_vector(max_dram_load_ack_bytes_other_node_tmp);
+    reset_vector(output_counts);
+    reset_vector(max_queue_size_tmp);
     #endif
   }
 };

@@ -371,8 +371,6 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
                 self.ln_receiver_update_unresolved_kv_count_ev_label    = self.get_event_mapping("receiver_update_unresolved_kv_count")
                 
                 self.ln_receiver_acknowledge_key_executed_ev_label      = self.get_event_mapping("receiver_acknowledge_key_executed")
-            
-        print(self.event_map)
 
     def generate_udkvmsr_task(self):
         '''
@@ -878,12 +876,12 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
                 set_ev_label(glb_mstr_loop_tran, self.scratch[0], self.cache_flush_ev_label)
                 glb_mstr_loop_tran.writeAction(f"sendr_wcont {self.ev_word} {self.scratch[0]} {self.num_lane_reg} {self.num_map_gen}")
                 if self.debug_flag or self.print_level >= 1:
-                    glb_mstr_loop_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Finish dispatch all the map tasks. Start the global synchronization, ev_word = %lu' {'X0'} {self.ev_word}")
+                    glb_mstr_loop_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Finish dispatch all %lu map tasks. Start the global synchronization, ev_word = %lu' {'X0'} {self.num_map_gen} {self.ev_word}")
                 glb_mstr_loop_tran.writeAction(f"yield")
             else:
                 glb_mstr_loop_tran.writeAction(f"sendr_wcont {self.ev_word} {self.saved_cont} {self.num_lane_reg} {self.num_map_gen}")
                 if self.debug_flag or self.print_level >= 1:
-                    glb_mstr_loop_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Finish dispatch all the map tasks. Start the global synchronization, ev_word = %lu' {'X0'} {self.ev_word}")
+                    glb_mstr_loop_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Finish dispatch all %lu map tasks. Start the global synchronization, ev_word = %lu' {'X0'} {self.num_map_gen} {self.ev_word}")
                 glb_mstr_loop_tran.writeAction(f"yield_terminate")
 
         # Added by: Jerry Ding
@@ -1028,7 +1026,7 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
             Finish flushing the cache, return to user continuation
             '''
             flush_ret_tran = self.state.writeTransition("eventCarry", self.state, self.state, self.cache_flush_ret_ev_label)
-            flush_ret_tran.writeAction(f"print ' '")
+            # flush_ret_tran.writeAction(f"print ' '")
             flush_ret_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.cache_flush_ret_ev_label}] Finish flushing the cache. UDKVMSR program {self.task} terminates, " + 
                                         f"number of reduce task process = %ld. Return to user continuation %lu' {'X0'} {self.num_map_gen} {self.saved_cont}")
             set_ignore_cont(flush_ret_tran, self.scratch[0])
@@ -1902,9 +1900,9 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
         for in_val, old_val, result in zip(in_values, old_values, results):
             tran.writeAction(f"add {in_val} {old_val} {result}")
         if self.debug_flag and self.print_level > 2:
-            tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Combine intermediate key = %ld values = " + 
-                             f"[{' '.join(['%ld' for _ in range(len(in_values))])}] with values = " + 
-                             f"[{' '.join(['%ld' for _ in range(len(old_values))])}]' {'X0'} {key} {' '.join(in_values)} {' '.join(old_values)}")
+            tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Combine intermediate key = %lu values = " + 
+                             f"[{' '.join(['%lu' for _ in range(len(in_values))])}] with values = " + 
+                             f"[{' '.join(['%lu' for _ in range(len(old_values))])}]' {'X0'} {key} {' '.join(in_values)} {' '.join(old_values)}")
         return tran
 
     def kv_reduce_loc(self, tran: EFAProgram.Transition, key: str, num_lanes_mask: str, base_lane: str, dest_id: str):
@@ -2384,7 +2382,7 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
                                          f"[{''.join(['%ld, ' for _ in range(len(ld_values))])}]' {'X0'} {' '.join(ld_values)}")
         # Apply the accumulated updates based on user-defined reduce funtion
         self.kv_combine_op(combine_get_tran, cached_key, cached_values, ld_values, result_regs)
-        if self.debug_flag and self.print_level > 2:
+        if (self.debug_flag and self.print_level > 2):
             combine_get_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.combine_get_ev_label}] Store key = %ld combine result values = " + 
                                          f"[{''.join(['%ld, ' for _ in range(len(result_regs))])}] at addr %lu(0x%lx)' {'X0'} {cached_key} {' '.join(result_regs)} {key_offset} {key_offset}")
         # Store the updated value back to the cache
@@ -2418,7 +2416,7 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
         combine_get_tran.writeAction(f"move {self.reduce_ctr_offset - self.metadata_offset}({buffer_addr}) {scratch[0]} 0 8")
         combine_get_tran.writeAction(f"addi {scratch[0]} {scratch[0]} 1")
         combine_get_tran.writeAction(f"move {scratch[0]} {self.reduce_ctr_offset - self.metadata_offset}({buffer_addr}) 0 8")
-        if self.debug_flag and self.print_level > 2:
+        if (self.debug_flag and self.print_level > 2):
             combine_get_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.task}] Lane %ld processed %ld reduce tasks' {'X0'} {'X0'} {scratch[0]}")
         combine_get_tran.writeAction(f"yieldt")
         combine_get_tran.writeAction(f"{continue_label}: yield")   # LB NEEDS MODIFICATION

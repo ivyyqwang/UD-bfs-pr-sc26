@@ -65,7 +65,12 @@ struct Rect {
     uint64_t by1 = b.start[1];
     uint64_t by2 = by1 + b.len[1];
 
-    return ax1 >= bx1 && ax2 >= bx2 && ay1 >= by1 && ay2 >= by2;
+    if (ax1 >= bx2 ||
+	ax2 <= bx1 ||
+	ay1 >= by2 ||
+	ay2 <= by1)
+	    return false;
+    return true;
   }
 
   bool operator==(Rect r) { return start[0] == r.start[0] && start[1] == r.start[1] && len[0] == r.len[0] && len[1] == r.len[1]; }

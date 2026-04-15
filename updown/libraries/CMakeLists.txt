@@ -13,11 +13,11 @@ if (UPDOWNRT_ENABLE_LIBRARIES)
     set(UPDOWNSIMRT_PYTHON_LIBRARY_SRC
         LMStaticMaps/LMStaticMap.udwh
         UDMapShuffleReduce/Macro.py
-        UDMapShuffleReduce/GlobalSync.py
-        UDMapShuffleReduce/KeyValueSetTPL.py
-        UDMapShuffleReduce/KVMapShuffleReduceTPL.py
+#         UDMapShuffleReduce/GlobalSync.py
+#         UDMapShuffleReduce/KeyValueSetTPL.py
+#         UDMapShuffleReduce/KVMapShuffleReduceTPL.py
         UDMapShuffleReduce/KVMSRMachineConfig.py
-        UDMapShuffleReduce/ScratchpadCache.py
+#         UDMapShuffleReduce/ScratchpadCache.py
         UDMapShuffleReduce/linkable/LinkableGlobalSync.py
         UDMapShuffleReduce/KVMSRMachineConfig.py
         dramalloc/dramalloc.py

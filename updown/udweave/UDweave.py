@@ -2,8 +2,10 @@
 import frontend.lexer as lex
 import frontend.parser as par
 import frontend.codeGen as codeGen
-import frontend.preprocessor
+import frontend.preprocessor as preprocessor
+import frontend.idiom_parser as idiom_parser
 import Weave.debug as debug
+import Weave.idioms as WeaveIdioms
 from backend import pythonGen
 from backend.registerAllocator import WeaveLifetimeRegAlloc
 from Weave.optimizer import *
@@ -97,6 +99,14 @@ def main():
     )
 
     parser.add_argument(
+        "--preprocessorIdioms",
+        "-ppi",
+        dest="preprocessor_idioms",
+        action="store_true",
+        help="Run preprocessor for idiom handling",
+    )
+
+    parser.add_argument(
         "--cpp-preprocessor-path",
         dest="cpp_preprocessor_path",
         action="store",
@@ -170,6 +180,7 @@ def main():
     if args.opt_level >= 2:
         applyOpts.append("RemoveUnusedVariables")
     applyOpts.append("InlineIntrinsic")
+    applyOpts.append("Reg2ImmSendInstruction")
     # if args.opt_level >= 2:
     #     applyOpts.append("UnusedInstrRemoval")
     applyOpts.append("IfCmpBranchMerging")
@@ -185,7 +196,7 @@ def main():
             if not os.path.isfile(inFile):
                 errorMsg(f"File {inFile} not found")
 
-            prep = frontend.preprocessor.WeavePreprocessor(
+            prep = preprocessor.WeavePreprocessor(
                 path=args.cpp_preprocessor_path, input_file=inFile, args=preprocessor_args
             )
 
@@ -198,10 +209,37 @@ def main():
                 outputManager(contents, outFile)
                 sys.exit(0)
 
-            # result = p.parser.parse(contents, lexer=l.lexer, debug=True, tracking=True)
+            idiomPrep = idiom_parser.IdiomParser()
+            contents, idiomData = idiomPrep.process(contents)
+            lines = contents.splitlines()
+
+            if len(idiomData) > 0:
+                debug.debugMsg(2, f"Found idioms: {idiomData}")
+                for idiom in reversed(idiomData): # build from bottom up due to the line number changes, when code is inserted
+                    selected_idiom = WeaveIdioms.WeaveIdiom.checkIdiom(idiom)
+
+                    if selected_idiom:
+                        debug.debugMsg(2, f"Idiom found: {selected_idiom().getName()}")
+                        instance = selected_idiom()
+                        instance.setIdiom(idiom)
+                        lines.append(instance.generate())
+                        lines.insert(idiom.start_line, instance.insertion())
+                    else:
+                        debug.errorMsg(f"Idiom (lines {idiom.start_line}-{idiom.end_line}) not supported")
+            contents = "\n".join(lines)
+
+            if args.preprocessor_idioms:
+                outputManager(idiomPrep.toString(idiomData, contents), outFile)
+                sys.exit(0)
+
+
             result = p.parse(
                 contents, debug=deb_parser, fileName=inFile, fileContent=contents
             )
+
+            # print(contents)
+            # sys.exit(0)
+
             if args.ast_dump:
                 outputManager(str(p.getTree()), outFile)
                 sys.exit(0)

@@ -550,6 +550,11 @@ class WeaveIntrinsicFunc(ABC):
         """Returns a list of WeaveIRtypes for the input type of the intrinsic's parameters"""
         pass
 
+    @classmethod
+    def getQualifiers(cls):
+        """Returns a list of WeaveIRqualifiers for the qualifiers of the intrinsic's parameter"""
+        return [WeaveIRqualifiers.unknown]*10
+
     @abstractmethod
     def generateWeaveIR(self):
         """Method to generate WeaveIR.
@@ -569,7 +574,12 @@ class WeaveIntrinsicFunc(ABC):
 
     @classmethod
     def getIntrinsics(cls, name):
-        return list(filter(lambda i: i.getName() == name, cls.allIntrinsics()))
+        intr = list(filter(lambda i: i.getName() == name, cls.allIntrinsics()))
+        intr.sort(key=lambda cls: any(
+            WeaveIRtypes.void in signature
+            for signature in cls.getInputTypes()
+        ))
+        return intr
 
     def __eq__(self, other):
         return (
@@ -674,55 +684,6 @@ class WeaveIntrinsicFunc(ABC):
                 self.ctx.getFileLocation(),
             )
 
-    def checkSendPolicy(self, ops: list, res: list) -> WeaveIRsendPolicy:
-        try:
-            sendPolicy = WeaveIRsendPolicy(ops[-1].getOriginalValue())
-            if sendPolicy == WeaveIRsendPolicy.DIRECT:
-                return sendPolicy
-
-            tempDecl = self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.i64)
-            res.append(
-                WeaveIRmemory(
-                    ctx=self.ctx,
-                    dataType=WeaveIRtypes.i64,
-                    opType=WeaveIRmemoryTypes.LOAD,
-                    ops=[ops[-1]],
-                )
-            )
-            res[-1].setRetOp(tempDecl.curReg)
-            res[-1].setFileLocation(self.ctx.getFileLocation())
-            res.append(
-                WeaveIRbitwise(
-                    ctx=self.ctx,
-                    dataType=WeaveIRtypes.i64,
-                    opType=WeaveIRbitwiseTypes.SHFTLFT,
-                    left=tempDecl.curReg,
-                    right=WeaveIRimmediate(self.ctx, 59, WeaveIRtypes.i32),
-                )
-            )
-            res[-1].setRetOp(tempDecl.curReg)
-            res[-1].setFileLocation(self.ctx.getFileLocation())
-            res.append(
-                WeaveIRbitwise(
-                    ctx=self.ctx,
-                    dataType=WeaveIRtypes.i64,
-                    opType=WeaveIRbitwiseTypes.BWOR,
-                    left=tempDecl.curReg,
-                    right=ops[0],
-                )
-            )
-            res[-1].setRetOp(tempDecl.curReg)
-            res[-1].setFileLocation(self.ctx.getFileLocation())
-            ops[0] = tempDecl.curReg
-            return sendPolicy
-
-        except ValueError:
-            errorMsg(
-                "UpDown send instruction only supports immediate values for the sendPolicy parameter.",
-                self.ctx.getFileLocation(),
-            )
-        return WeaveIRsendPolicy.DIRECT
-
 
 class sendEvWordToNIDCont(WeaveIntrinsicFunc):
     """Send an event word to a specific network ID,
@@ -730,8 +691,7 @@ class sendEvWordToNIDCont(WeaveIntrinsicFunc):
     send_event(unsigned long evWord,
         <type>* local data,
         unsigned int size,
-        unsigned long contWord,
-        [unsigned int sendPolicy])
+        unsigned long contWord)
     """
 
     def __init__(self, ctx):
@@ -756,38 +716,31 @@ class sendEvWordToNIDCont(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.ptr,  # data
             WeaveIRtypes.i32,  # size
+            WeaveIRtypes.c64,  # IGNRCONT
+        ],[
+            WeaveIRtypes.i64,  # evWord
+            WeaveIRtypes.ptr,  # data
+            WeaveIRtypes.i64,  # size
             WeaveIRtypes.i64,  # contWord
-            WeaveIRtypes.c8,  # sendPolicy
         ], [
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.ptr,  # data
-            WeaveIRtypes.i32,  # size
+            WeaveIRtypes.i64,  # size
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.ptr,  # data
-            WeaveIRtypes.i32,  # size
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.spmem, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
         ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [False, False, False, True])
-        if not isinstance(ops[2], WeaveIRimmediate):
+        if isinstance(ops[2], WeaveIRimmediate) and not 2 <= ops[2].getOriginalValue() <= 9:
             errorMsg(
-                "UpDown send instruction only supports immediate values for the size parameter.",
+                "UpDown send instruction only supports immediate values between 2 and 9.",
                 self.ctx.getFileLocation(),
             )
-        elif not 2 <= ops[2].getOriginalValue() <= 9:
-            errorMsg(
-                "The size is out of range. It has to be between 2 and 9.",
-                self.ctx.getFileLocation(),
-            )
-            
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 5:
-            sendPolicy = self.checkSendPolicy(ops, res)
             
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -795,7 +748,7 @@ class sendEvWordToNIDCont(WeaveIntrinsicFunc):
             ops[1],  # Xptr Pointer to SPmem
             ops[2],  # $len Size of transfer in words
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SEND_WCONT, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SEND_WCONT, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -804,8 +757,7 @@ class sendrEvWord0NIDCont(WeaveIntrinsicFunc):
     """Send an event word to a specific network ID,
     specifying the continuation
     send_event(unsigned long evWord,
-        unsigned long contWord,
-        [unsigned int sendPolicy])
+        unsigned long contWord)
     """
 
     def __init__(self, ctx):
@@ -826,25 +778,13 @@ class sendrEvWord0NIDCont(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # contWord
         ], [
             WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.i64,  # contWord
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, False])
-        
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 3:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True])
             
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -852,7 +792,7 @@ class sendrEvWord0NIDCont(WeaveIntrinsicFunc):
             ops[0],  # X1 Data Word
             ops[0],  # X2 Data Word (Dup'ed to have all operands)
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WCONT, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WCONT, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -862,8 +802,7 @@ class sendrEvWord1NIDCont(WeaveIntrinsicFunc):
     specifying the continuation
     send_event(unsigned long evWord,
         <type> data,
-        unsigned long contWord,
-        [unsigned int sendPolicy])
+        unsigned long contWord)
     """
 
     def __init__(self, ctx):
@@ -886,27 +825,13 @@ class sendrEvWord1NIDCont(WeaveIntrinsicFunc):
         ], [
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # data
-            WeaveIRtypes.i64,  # contWord
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, False])
-        
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 4:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True])
         
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -914,7 +839,7 @@ class sendrEvWord1NIDCont(WeaveIntrinsicFunc):
             ops[1],  # X1 Data Word
             ops[1],  # X2 Data Word (Dup'ed to have all operands)
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WCONT, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WCONT, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -925,8 +850,7 @@ class sendrEvWord2NIDCont(WeaveIntrinsicFunc):
     send_event(unsigned long evWord,
         <type> data1,
         <type> data2,
-        unsigned long contWord,
-        [unsigned int sendPolicy])
+        unsigned long contWord)
     """
 
     def __init__(self, ctx):
@@ -951,29 +875,13 @@ class sendrEvWord2NIDCont(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # data1
             WeaveIRtypes.void,  # data2
-            WeaveIRtypes.i64,  # contWord
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data1
-            WeaveIRtypes.void,  # data2
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data1
-            WeaveIRtypes.void,  # data2
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, True, False])
-        
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 5:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, True])
             
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -981,7 +889,7 @@ class sendrEvWord2NIDCont(WeaveIntrinsicFunc):
             ops[1],  # X1 Data Word
             ops[2],  # X2 Data Word
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WCONT, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WCONT, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -993,8 +901,7 @@ class sendrEvWord3NIDCont(WeaveIntrinsicFunc):
         <type> data1,
         <type> data2,
         <type> data3,
-        unsigned long contWord,
-        [unsigned int sendPolicy])
+        unsigned long contWord)
     """
 
     def __init__(self, ctx):
@@ -1021,32 +928,13 @@ class sendrEvWord3NIDCont(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # data1
             WeaveIRtypes.void,  # data2
             WeaveIRtypes.void,  # data3
-            WeaveIRtypes.i64,  # contWord
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data1
-            WeaveIRtypes.void,  # data2
-            WeaveIRtypes.void,  # data3
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data1
-            WeaveIRtypes.void,  # data2
-            WeaveIRtypes.void,  # data3
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(),
-                                                  [True, True, True, True, True, False])
-
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 6:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, True, True])
 
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -1056,7 +944,7 @@ class sendrEvWord3NIDCont(WeaveIntrinsicFunc):
             ops[3],  # X3 Data Word
         ]
         
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR3_WCONT, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR3_WCONT, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1066,8 +954,7 @@ class sendOpsCont(WeaveIntrinsicFunc):
     send_ops(unsigned long evWord,
         <type> startOpRegisterVariable,
         unsigned int numRegisters,
-        unsigned long contWord,
-        [unsigned int sendPolicy])
+        unsigned long contWord)
     """
 
     def __init__(self, ctx):
@@ -1092,19 +979,7 @@ class sendOpsCont(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # operand variable indicating the first operand register to send
             WeaveIRtypes.i32,  # number of registers to send
-            WeaveIRtypes.i64,  # continuation word
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # operand variable indicating the first operand register to send
-            WeaveIRtypes.i32,  # number of registers to send
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # operand variable indicating the first operand register to send
-            WeaveIRtypes.i32,  # number of registers to send
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ], [
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # operand variable indicating the first operand register to send
@@ -1114,34 +989,21 @@ class sendOpsCont(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # operand variable indicating the first operand register to send
             WeaveIRtypes.i64,  # number of registers to send
-            WeaveIRtypes.i64,  # continuation word
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # operand variable indicating the first operand register to send
-            WeaveIRtypes.i64,  # number of registers to send
             WeaveIRtypes.c64,  # IGNRCONT
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # operand variable indicating the first operand register to send
-            WeaveIRtypes.i64,  # number of registers to send
-            WeaveIRtypes.c64,  # IGNRCONT
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()
-        if not isinstance(ops[2], WeaveIRimmediate) or not 2 <= ops[2].getOriginalValue() <= 9:
-            errorMsg(
-                "UpDown sendops instruction only supports immediate values between 2 and 9 as length",
-                self.ctx.getFileLocation(),
-            )
+        if isinstance(ops[2], WeaveIRimmediate):
+            if ops[2].getOriginalValue() == 1:
+                ops[2].setValue(2)
+            if not 1 <= ops[2].getOriginalValue() <= 9:
+                errorMsg(
+                    "UpDown sendops instruction only supports immediate values between 1 and 9 as length",
+                    self.ctx.getFileLocation(),
+                )
         self.ctx.ctx_scope.startScope()
         ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [False, False, False, True])
-        
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 5:
-            sendPolicy = self.checkSendPolicy(ops, res)
 
         ops = [
             ops[0],  # Xe  Destination Event Word
@@ -1149,7 +1011,7 @@ class sendOpsCont(WeaveIntrinsicFunc):
             ops[1],  # Xop Start operand register number
             ops[2],  # $imm number of registers to send
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDOPS_WCONT, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDOPS_WCONT, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1160,8 +1022,7 @@ class sendEvWordToNIDEvLabel(WeaveIntrinsicFunc):
     send_event(unsigned long evWord,
                 <type>* local data,
                 unsigned int size,
-                eventLabel,
-                [unsigned int sendPolicy])
+                eventLabel)
     """
 
     def __init__(self, ctx):
@@ -1185,29 +1046,23 @@ class sendEvWordToNIDEvLabel(WeaveIntrinsicFunc):
         ], [
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.ptr,  # data
-            WeaveIRtypes.i32,  # size
+            WeaveIRtypes.i64,  # size
             WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.spmem, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
         ops = self.ctx.getInOps()
         res = []
-        if not isinstance(ops[2], WeaveIRimmediate):
+        if isinstance(ops[2], WeaveIRimmediate) and not 2 <= ops[2].getOriginalValue() <= 9:
             errorMsg(
-                "UpDown send instruction only supports immediate values",
+                "UpDown send instruction only supports immediate values between 2 and 9.",
                 self.ctx.getFileLocation(),
             )
-        elif not 2 <= ops[2].getOriginalValue() <= 9:
-            errorMsg(
-                "The size is out of range. It has to be between 2 and 9.",
-                self.ctx.getFileLocation(),
-            )
-
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 5:
-            sendPolicy = self.checkSendPolicy(ops, res)
 
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -1217,7 +1072,7 @@ class sendEvWordToNIDEvLabel(WeaveIntrinsicFunc):
             self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.ptr, toBeInitialized=False).curReg,
         ]
 
-        res = [WeaveIRsend(self.ctx, WeaveIRsendTypes.SEND_WRET, ops, sendPolicy)]
+        res = [WeaveIRsend(self.ctx, WeaveIRsendTypes.SEND_WRET, ops)]
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1226,8 +1081,7 @@ class sendrEvWord0NIDEvLabel(WeaveIntrinsicFunc):
     """Send an event word to a specific network ID,
     specifying the event label as the continuation
     send_event(unsigned long evWord,
-                eventLabel,
-                [unsigned int sendPolicy])
+                eventLabel)
     """
 
     def __init__(self, ctx):
@@ -1246,19 +1100,15 @@ class sendrEvWord0NIDEvLabel(WeaveIntrinsicFunc):
         return [[
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.ptr,  # eventLabel
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
         ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, False, False])
-
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 3:
-            sendPolicy = self.checkSendPolicy(ops, res)
 
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -1267,7 +1117,7 @@ class sendrEvWord0NIDEvLabel(WeaveIntrinsicFunc):
             ops[0],  # X2 Data Word (Dup'ed to have all operands)
             self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.ptr, toBeInitialized=False).curReg,
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WRET, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WRET, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1277,8 +1127,7 @@ class sendrEvWord1NIDEvLabel(WeaveIntrinsicFunc):
     specifying the event label as the continuation
     send_event(unsigned long evWord,
                 <type> data1,
-                eventLabel,
-                [unsigned int sendPolicy])
+                eventLabel)
     """
 
     def __init__(self, ctx):
@@ -1298,21 +1147,12 @@ class sendrEvWord1NIDEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # data
             WeaveIRtypes.ptr,  # eventLabel
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data
-            WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, False, False])
-
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 4:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, False])
 
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -1321,7 +1161,7 @@ class sendrEvWord1NIDEvLabel(WeaveIntrinsicFunc):
             ops[1],  # X2 Data Word (Dup'ed to have all operands)
             self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.ptr, toBeInitialized=False).curReg,
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WRET, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WRET, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1333,8 +1173,7 @@ class sendrEvWord2NIDEvLabel(WeaveIntrinsicFunc):
                 <type> data1,
                 <type> data2,
                 unsigned int size,
-                eventLabel,
-                [unsigned int sendPolicy])
+                eventLabel)
     """
 
     def __init__(self, ctx):
@@ -1355,22 +1194,12 @@ class sendrEvWord2NIDEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # data1
             WeaveIRtypes.void,  # data2
             WeaveIRtypes.ptr,  # eventLabel
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data1
-            WeaveIRtypes.void,  # data2
-            WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, False, False])
-
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 5:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, False])
 
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -1379,7 +1208,7 @@ class sendrEvWord2NIDEvLabel(WeaveIntrinsicFunc):
             ops[2],  # X2 Data Word
             self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.ptr, toBeInitialized=False).curReg,
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WRET, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR_WRET, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1392,8 +1221,7 @@ class sendrEvWord3NIDEvLabel(WeaveIntrinsicFunc):
                 <type> data2,
                 <type> data3,
                 unsigned int size,
-                eventLabel,
-                [unsigned int sendPolicy])
+                eventLabel)
     """
 
     def __init__(self, ctx):
@@ -1415,24 +1243,12 @@ class sendrEvWord3NIDEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # data2
             WeaveIRtypes.void,  # data3
             WeaveIRtypes.ptr,  # eventLabel
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # data1
-            WeaveIRtypes.void,  # data2
-            WeaveIRtypes.void,  # data3
-            WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
-        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(),
-                                                  [True, True, True, True, False, False])
-
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 6:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        ops, res, tempDecl = self.convertImmToReg(self.getInputTypes(), [True, True, True, True, False])
 
         ops = [
             ops[0],  # Xe Destination Event Word
@@ -1442,7 +1258,7 @@ class sendrEvWord3NIDEvLabel(WeaveIntrinsicFunc):
             ops[3],  # X3 Data Word
             self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.ptr, toBeInitialized=False).curReg,
         ]
-        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR3_WRET, ops, sendPolicy))
+        res.append(WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDR3_WRET, ops))
         self.ctx.ctx_scope.endScope()
         return res
 
@@ -1452,8 +1268,7 @@ class sendOpsEvLabel(WeaveIntrinsicFunc):
     send_ops(unsigned long evWord,
         <type>> startOpRegisterVariable,
         unsigned int numRegisters,
-        eventLabel,
-        [unsigned int sendPolicy])
+        eventLabel)
     """
 
     def __init__(self, ctx):
@@ -1477,36 +1292,21 @@ class sendOpsEvLabel(WeaveIntrinsicFunc):
         ], [
             WeaveIRtypes.i64,  # evWord
             WeaveIRtypes.void,  # operand variable indicating the first operand register to send
-            WeaveIRtypes.i32,  # number of registers to send (2-9)
-            WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # operand variable indicating the first operand register to send
             WeaveIRtypes.i64,  # number of registers to send (2-9)
             WeaveIRtypes.ptr,  # eventLabel
-        ], [
-            WeaveIRtypes.i64,  # evWord
-            WeaveIRtypes.void,  # operand variable indicating the first operand register to send
-            WeaveIRtypes.i64,  # number of registers to send (2-9)
-            WeaveIRtypes.ptr,  # eventLabel
-            WeaveIRtypes.c8,  # sendPolicy
         ]]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()
-        res = []
-        if not isinstance(ops[2], WeaveIRimmediate) or not 1 <= ops[2].getOriginalValue() <= 9:
-            errorMsg(
-                "UpDown sendops instruction only supports immediate values between 1 and 9 as length",
-                self.ctx.getFileLocation(),
-            )
-        if ops[2].getOriginalValue() == 1:
-            ops[2].setValue(2)
-        
-        sendPolicy = WeaveIRsendPolicy.DIRECT
-        if len(ops) == 5:
-            sendPolicy = self.checkSendPolicy(ops, res)
+        if isinstance(ops[2], WeaveIRimmediate):
+            if ops[2].getOriginalValue() == 1:
+                ops[2].setValue(2)
+            if not 1 <= ops[2].getOriginalValue() <= 9:
+                errorMsg(
+                    "UpDown sendops instruction only supports immediate values between 1 and 9 as length",
+                    self.ctx.getFileLocation(),
+                )
+
 
         self.ctx.ctx_scope.startScope()
         ops = [
@@ -1517,7 +1317,7 @@ class sendOpsEvLabel(WeaveIntrinsicFunc):
             self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.ptr, toBeInitialized=False).curReg,
         ]
         self.ctx.ctx_scope.endScope()
-        return [WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDOPS_WRET, ops, sendPolicy)]
+        return [WeaveIRsend(self.ctx, WeaveIRsendTypes.SENDOPS_WRET, ops)]
 
 
 class sendRdDRAMCont(WeaveIntrinsicFunc):
@@ -1544,13 +1344,21 @@ class sendRdDRAMCont(WeaveIntrinsicFunc):
             WeaveIRtypes.ptr,  # globalAddress
             WeaveIRtypes.i32,  # size
             WeaveIRtypes.i64,  # contWord
+        ], [
+            WeaveIRtypes.ptr,  # globalAddress
+            WeaveIRtypes.i64,  # size
+            WeaveIRtypes.i64,  # contWord
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()
-        if not isinstance(ops[1], WeaveIRimmediate):
+        if isinstance(ops[1], WeaveIRimmediate) and not 1 <= ops[1].getOriginalValue() <= 8:
             errorMsg(
-                "UpDown send instruction only supports immediate values",
+                "UpDown send instruction only supports immediate values between 1 and 8 as length",
                 self.ctx.getFileLocation(),
             )
         self.checkGlobalAddress(ops[0])
@@ -1587,14 +1395,22 @@ class sendRdDRAMEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.ptr,  # globalAddress
             WeaveIRtypes.i32,  # size
             WeaveIRtypes.ptr,  # eventLabel
+        ], [
+            WeaveIRtypes.ptr,  # globalAddress
+            WeaveIRtypes.i64,  # size
+            WeaveIRtypes.ptr,  # contWord
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
         ops = self.ctx.getInOps()
-        if not isinstance(ops[1], WeaveIRimmediate):
+        if isinstance(ops[1], WeaveIRimmediate) and not 1 <= ops[1].getOriginalValue() <= 8:
             errorMsg(
-                "UpDown send instruction only supports immediate values",
+                "UpDown send instruction only supports immediate values between 1 and 8 as length",
                 self.ctx.getFileLocation(),
             )
         self.checkGlobalAddress(ops[0])
@@ -1639,13 +1455,22 @@ class sendWrDRAMCont(WeaveIntrinsicFunc):
             WeaveIRtypes.ptr,  # Pointer to local data to write
             WeaveIRtypes.i32,  # size in words
             WeaveIRtypes.i64,  # contWord
+        ], [
+            WeaveIRtypes.ptr,  # globalAddress
+            WeaveIRtypes.ptr,  # Pointer to local data to write
+            WeaveIRtypes.i64,  # size in words
+            WeaveIRtypes.i64,  # contWord
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.spmem, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()
-        if not isinstance(ops[2], WeaveIRimmediate):
+        if isinstance(ops[1], WeaveIRimmediate) and not 1 <= ops[1].getOriginalValue() <= 8:
             errorMsg(
-                "UpDown send instruction only supports immediate values",
+                "UpDown send instruction only supports immediate values between 1 and 8 as length",
                 self.ctx.getFileLocation(),
             )
         ops = [
@@ -1683,6 +1508,10 @@ class sendr1WrDRAMCont(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # Data
             WeaveIRtypes.i64,  # contWord
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
@@ -1728,6 +1557,10 @@ class sendr2WrDRAMCont(WeaveIntrinsicFunc):
             WeaveIRtypes.i64,  # contWord
         ]]
 
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
+
     def generateWeaveIR(self):
         # convertImmToReg might assign a temp register
         self.ctx.ctx_scope.startScope()
@@ -1771,12 +1604,21 @@ class sendOpsWrDRAMCont(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # the operand variable indicating the first operand register to send
             WeaveIRtypes.i32,  # length
             WeaveIRtypes.i64,  # continuation word
+        ], [
+            WeaveIRtypes.ptr,  # globalAddress
+            WeaveIRtypes.void,  # the operand variable indicating the first operand register to send
+            WeaveIRtypes.i64,  # length
+            WeaveIRtypes.i64,  # continuation word
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()
         self.checkGlobalAddress(ops[0])
-        if not isinstance(ops[2], WeaveIRimmediate) or not 1 <= ops[2].getOriginalValue() <= 8:
+        if isinstance(ops[2], WeaveIRimmediate) and not 1 <= ops[2].getOriginalValue() <= 8:
             errorMsg(
                 "UpDown sendmops instruction only supports immediate values between 1 and 8 as length",
                 self.ctx.getFileLocation(),
@@ -1819,14 +1661,23 @@ class sendWrDRAMEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.ptr,  # Pointer to local data to write
             WeaveIRtypes.i32,  # size in words
             WeaveIRtypes.ptr,  # Event Label
+        ], [
+            WeaveIRtypes.ptr,  # globalAddress
+            WeaveIRtypes.ptr,  # Pointer to local data to write
+            WeaveIRtypes.i64,  # size in words
+            WeaveIRtypes.ptr,  # Event Label
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.spmem, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
         ops = self.ctx.getInOps()
-        if not isinstance(ops[2], WeaveIRimmediate):
+        if isinstance(ops[1], WeaveIRimmediate) and not 1 <= ops[1].getOriginalValue() <= 8:
             errorMsg(
-                "UpDown send instruction only supports immediate values",
+                "UpDown send instruction only supports immediate values between 1 and 8 as length",
                 self.ctx.getFileLocation(),
             )
         ops = [
@@ -1867,6 +1718,10 @@ class sendr1WrDRAMEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # Data
             WeaveIRtypes.ptr,  # Event Label
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
@@ -1912,6 +1767,10 @@ class sendr2WrDRAMEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # Data2
             WeaveIRtypes.ptr,  # Event Label
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         self.ctx.ctx_scope.startScope()
@@ -1959,11 +1818,20 @@ class sendOpsWrDRAMEvLabel(WeaveIntrinsicFunc):
             WeaveIRtypes.void,  # the first operand register variable of the operand buffer to send
             WeaveIRtypes.i32,  # length
             WeaveIRtypes.ptr,  # Event Label
+        ], [
+            WeaveIRtypes.ptr,  # globalAddress
+            WeaveIRtypes.void,  # the first operand register variable of the operand buffer to send
+            WeaveIRtypes.i64,  # length
+            WeaveIRtypes.ptr,  # Event Label
         ]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()
-        if not isinstance(ops[2], WeaveIRimmediate) or not 1 <= ops[2].getOriginalValue() <= 8:
+        if isinstance(ops[2], WeaveIRimmediate) and not 1 <= ops[2].getOriginalValue() <= 8:
             errorMsg(
                 "UpDown sendmops instruction only supports immediate values between 1 and 8 as length",
                 self.ctx.getFileLocation(),
@@ -2012,10 +1880,20 @@ class EWnew(WeaveIntrinsicFunc):
             [WeaveIRtypes.i64, WeaveIRtypes.ptr],
         ]
 
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
+
     def generateWeaveIR(self):
         resultReg = self.ctx.getAsOperand()
         ops = self.ctx.getInOps()
         res, ops[0], tempDecl = self.checkNetIDImmediate(ops[0])
+
+        if not isinstance(ops[0], WeaveIRimmediate) and resultReg.getDecl() == ops[0].getDecl():
+            tempDecl = self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.i64)
+            initReg = tempDecl.curReg
+        else:
+            initReg = resultReg
 
         # Initialize the event word to 0
         res.append(
@@ -2026,7 +1904,7 @@ class EWnew(WeaveIntrinsicFunc):
                 [WeaveIRimmediate(self.ctx, 0, WeaveIRtypes.i64)],
             )
         )
-        res[-1].setRetOp(resultReg)
+        res[-1].setRetOp(initReg)
 
         if len(ops) == 3:
             warningMsg(f"DEPRECATED! The number of operands for evw_new {self.ctx.getFileLocation()} "
@@ -2038,7 +1916,7 @@ class EWnew(WeaveIntrinsicFunc):
             WeaveIRupdate(
                 self.ctx,
                 [
-                    resultReg,  # Empty Event Word
+                    initReg,  # Empty Event Word
                     ops[1],  # Event Label
                     imm_newThr,  # ThreadID = New Thread ID = 0xFF
                     ops[0],  # NetID
@@ -2112,6 +1990,10 @@ class EWupdateEvent(WeaveIntrinsicFunc):
             [WeaveIRtypes.i64, WeaveIRtypes.ptr, WeaveIRtypes.i32],
             [WeaveIRtypes.i64, WeaveIRtypes.ptr, WeaveIRtypes.i64],
             [WeaveIRtypes.i64, WeaveIRtypes.ptr]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         res = []
@@ -2235,6 +2117,155 @@ class EWupdateThread(WeaveIntrinsicFunc):
         update = WeaveIRupdate(self.ctx, ops)
         update.setRetOp(self.ctx.getAsOperand())
         return [update]
+
+
+class EWupdateSendPolicy(WeaveIntrinsicFunc):
+    """ For standard event words the send policy is DIRECT. This intrinsic allows to change the policy of the
+    event word.
+    evw_update_sp(unsigned long evWord, uint8_t sendPolicy)
+    """
+
+    def __init__(self, ctx):
+        super().__init__(ctx)
+
+    @classmethod
+    def getName(cls):
+        return "evw_update_sp"
+
+    @classmethod
+    def getReturnType(cls):
+        return WeaveIRtypes.i64
+
+    @classmethod
+    def getInputTypes(cls):
+        return [
+            [WeaveIRtypes.i64, WeaveIRtypes.c8],
+            [WeaveIRtypes.i64, WeaveIRtypes.i32],
+            [WeaveIRtypes.i64, WeaveIRtypes.i64]
+        ]
+
+
+    def generateWeaveIR(self):
+        ops = self.ctx.getInOps()
+        res = []
+
+        tempReg0 = self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.i64).curReg
+        sendPolicy = WeaveIRsendPolicy.DIRECT
+        if isinstance(ops[1], WeaveIRimmediate):
+            try:
+                sendPolicy = WeaveIRsendPolicy(ops[-1].getOriginalValue())
+            except ValueError:
+                errorMsg(f"Invalid send policy value for evw_update_sp.\nValid options are: "
+                         f"{SP_DIRECT.getName()}, "
+                         f"{SP_SHORTEST.getName()}, {SP_SHORTEST_LOW.getName()}, {SP_SHORTEST_HIGH.getName()}, "
+                         f"{SP_LONGEST.getName()}, {SP_LONGEST_LOW.getName()}, {SP_LONGEST_HIGH.getName()}, and "
+                         f"{SP_NEAR_ADDRESS.getName()}", self.ctx.getFileLocation())
+
+        # If the send policy is not NEAREST (all bits set), we have to zero out the send policy bits, first
+        if sendPolicy != WeaveIRsendPolicy.NEAR_ADDRESS or not isinstance(ops[1], WeaveIRimmediate):
+            # Clear the send policy bits first
+            # Load the mask 0b111, shift it left by 59, invert it, and AND it with the event word
+            res.append(
+                WeaveIRmemory(
+                    ctx=self.ctx,
+                    dataType=WeaveIRtypes.i64,
+                    opType=WeaveIRmemoryTypes.LOAD,
+                    ops=[WeaveIRimmediate(self.ctx, 0b111, WeaveIRtypes.i64)],
+                )
+            )
+            res[-1].setRetOp(tempReg0)
+            res[-1].setFileLocation(self.ctx.getFileLocation())
+
+            res.append(
+                WeaveIRbitwise(
+                    ctx=self.ctx,
+                    dataType=WeaveIRtypes.i64,
+                    opType=WeaveIRbitwiseTypes.SHFTLFT,
+                    left=tempReg0,
+                    right=WeaveIRimmediate(self.ctx, 59, WeaveIRtypes.i64),
+                )
+            )
+            res[-1].setRetOp(tempReg0)
+            res[-1].setFileLocation(self.ctx.getFileLocation())
+
+            res.append(
+                WeaveIRbitwise(
+                    ctx=self.ctx,
+                    dataType=WeaveIRtypes.i64,
+                    opType=WeaveIRbitwiseTypes.BWXOR,
+                    left=tempReg0,
+                    right=WeaveIRimmediate(self.ctx, -1, WeaveIRtypes.i64),
+                )
+            )
+            res[-1].setRetOp(tempReg0)
+            res[-1].setFileLocation(self.ctx.getFileLocation())
+
+            res.append(
+                WeaveIRbitwise(
+                    ctx=self.ctx,
+                    dataType=WeaveIRtypes.i64,
+                    opType=WeaveIRbitwiseTypes.BWAND,
+                    left=tempReg0,
+                    right=ops[0],
+                )
+            )
+            res[-1].setRetOp(self.ctx.getAsOperand())
+            res[-1].setFileLocation(self.ctx.getFileLocation())
+
+        # By now the SP policy bits are cleared. We reuse the tempReg0 to build the new send policy
+        # Set the send policy bits
+        if isinstance(ops[1], WeaveIRimmediate):
+            if sendPolicy == WeaveIRsendPolicy.DIRECT:
+                return res
+
+            res.append(
+                WeaveIRmemory(
+                    ctx=self.ctx,
+                    dataType=WeaveIRtypes.i64,
+                    opType=WeaveIRmemoryTypes.LOAD,
+                    ops=[ops[-1]],
+                )
+            )
+
+        # The send policy is in a register. Bitwise AND it with the mask 0b111 and store it in
+        # the temp register we used to clear the SP bits.
+        else:
+            tempDecl = self.ctx.ctx_scope.getTempDeclaration(WeaveIRtypes.i64)
+            res.append(
+                WeaveIRbitwise(
+                    ctx=self.ctx,
+                    dataType=WeaveIRtypes.i64,
+                    opType=WeaveIRbitwiseTypes.BWAND,
+                    left=ops[1],
+                    right=WeaveIRimmediate(self.ctx, 0x7, WeaveIRtypes.i64),
+                )
+            )
+        res[-1].setRetOp(tempReg0)
+        res[-1].setFileLocation(self.ctx.getFileLocation())
+
+        res.append(
+            WeaveIRbitwise(
+                ctx=self.ctx,
+                dataType=WeaveIRtypes.i64,
+                opType=WeaveIRbitwiseTypes.SHFTLFT,
+                left=tempReg0,
+                right=WeaveIRimmediate(self.ctx, 59, WeaveIRtypes.i32),
+            )
+        )
+        res[-1].setRetOp(tempReg0)
+        res[-1].setFileLocation(self.ctx.getFileLocation())
+        res.append(
+            WeaveIRbitwise(
+                ctx=self.ctx,
+                dataType=WeaveIRtypes.i64,
+                opType=WeaveIRbitwiseTypes.BWOR,
+                left=tempReg0,
+                right=self.ctx.getAsOperand(),
+            )
+        )
+        res[-1].setRetOp(self.ctx.getAsOperand())
+        res[-1].setFileLocation(self.ctx.getFileLocation())
+        return res
 
 
 class newNetID(WeaveIntrinsicFunc):
@@ -2658,6 +2689,10 @@ class copyOperandsImm(WeaveIntrinsicFunc):
     def getInputTypes(cls):
         return [[WeaveIRtypes.void, WeaveIRtypes.ptr, WeaveIRtypes.i32],
                 [WeaveIRtypes.void, WeaveIRtypes.ptr, WeaveIRtypes.i64]]
+
+    @classmethod
+    def getQualifiers(cls):
+        return [WeaveIRqualifiers.unknown, WeaveIRqualifiers.spmem, WeaveIRqualifiers.unknown]
 
     def generateWeaveIR(self):
         ops = self.ctx.getInOps()

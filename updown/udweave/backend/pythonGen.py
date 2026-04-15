@@ -1,8 +1,11 @@
+from Weave.WeaveIRenums import WeaveIRarithTypes
 from frontend.ASTweave import *
 from Weave.WeaveIR import *
 from backend.registerAllocator import WeaveRegisterAllocator
 import Weave.optimizer as optimizer
 import Weave.debug as debug
+import subprocess
+import os
 
 
 class WeavePythonCodeGen:
@@ -162,6 +165,23 @@ class WeavePythonCodeGen:
         for s in self.program.getSections():
             if isinstance(s, WeaveIRGlobalDecl):
                 self.add_line(f"#constexp {s.fullName} = {s.value}")
+        self.add_line("")
+
+    def _addUDWVersion(self):
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+
+            # Get short hash and commit message
+            result = subprocess.run(['git', 'log', '-1', '--pretty=format:%h (%as)'],
+                              cwd=script_dir,
+                              capture_output=True,
+                              text=True,
+                              check=True)
+            udwVersion = result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            udwVersion = "unknown"
+
+        self.add_line(f"## UDWeave version: {udwVersion}")
         self.add_line("")
 
     def programTranslate(self):
@@ -362,7 +382,7 @@ class WeavePythonCodeGen:
             def computeAddress():
                 """ Compute the address and offset, when accessing local memory"""
                 # in case we have to load from/store to a pointer that is a struct.
-                if isinstance(inst.dataType, WeaveIRstructDecl):
+                if isinstance(inst.dataType, WeaveIRStructTypeDecl):
                     if helper.isPowerOfTwo(inst.dataType.getSize(inst.getFileLocation())):
                         compScale = helper.log2(inst.dataType.getSize(inst.getFileLocation()))
                     else:
@@ -376,7 +396,7 @@ class WeavePythonCodeGen:
                         offset.setValue(compFieldOffset)
                     else:
                         compFieldOffset = inst.dataType.getFieldOffset(field)
-                elif isinstance(inst.dataType, WeaveIRunionDecl):
+                elif isinstance(inst.dataType, WeaveIRUnionTypeDecl):
                     if helper.isPowerOfTwo(inst.dataType.getSize(inst.getFileLocation())):
                         compScale = helper.log2(inst.dataType.getSize(inst.getFileLocation()))
                     else:
@@ -395,6 +415,14 @@ class WeavePythonCodeGen:
                     else:
                         compFieldOffset = 0
                 return compScale, compSize, compFieldOffset
+
+            def handlingPostOperator(curInst, curOffsetReg):
+                if isinstance(curInst.getOffsetDecl(), WeaveIRpostOperator):
+                    if curInst.getOffsetDecl().instType == WIRinst.WeaveIRarithTypes.IADDITION:
+                        self.add_action(transName, f"addi {curOffsetReg} {curOffsetReg} 1")
+                    else:
+                        self.add_action(transName, f"subi {curOffsetReg} {curOffsetReg} 1")
+
 
             # Register to register
             if inst.instType == WIRinst.WeaveIRmemoryTypes.LOAD:
@@ -422,6 +450,7 @@ class WeavePythonCodeGen:
                 if valueToBeStored is None:
                     valueToBeStored = self.regAlloc.getTempReg(0, inst.ctx_event).name
 
+                # E.g. `spPtr[1]`
                 if isinstance(offset, WeaveIRimmediate):
                     addressReg = inst.getPointerReg().getAllocation()
 
@@ -436,6 +465,8 @@ class WeavePythonCodeGen:
 
                     res += f"movrl {valueToBeStored} {fieldOffset}({addressReg}) 0 {size}"
                     self.add_action(transName, res)
+
+                # E.g. `spPtr[i]`
                 else:
                     # For word size = 8, the movw instruction is used (see below)
                     # If the word size is != we have to build the address using a temporary register
@@ -462,11 +493,21 @@ class WeavePythonCodeGen:
                         self.add_action(transName, res)
                         res = f"movrl {valueToBeStored} {fieldOffset}({temp1}) 0 {size}"
                         self.add_action(transName, res)
+                        handlingPostOperator(inst, offsetReg)
+
                     else:
                         #  Note: The scale is incremented by 3 by the instruction. Hence, it only works for 8 byte
                         #  values.
-                        #        movwrl    Xs                         Xb                            Xd    inc, scale
-                        res += f"movwrl {valueToBeStored} {inst.getPointerReg().getAllocation()}({offsetReg},0,0)"
+                        if isinstance(inst.getOffsetDecl(), WeaveIRpostOperator):
+                            if inst.getOffsetDecl().instType == WIRinst.WeaveIRarithTypes.IADDITION:
+                                #        movwrl    Xs                         Xb                            Xd    inc, scale
+                                res += f"movwrl {valueToBeStored} {inst.getPointerReg().getAllocation()}({offsetReg},1,0)"
+                            else:
+                                res += f"movwrl {valueToBeStored} {inst.getPointerReg().getAllocation()}({offsetReg},0,0)"
+                                self.add_action(transName, res)
+                                res = f"subi {offsetReg} {offsetReg} 1"
+                        else:
+                            res += f"movwrl {valueToBeStored} {inst.getPointerReg().getAllocation()}({offsetReg},0,0)"
                         self.add_action(transName, res)
 
             # Load from Scratchpad
@@ -518,12 +559,22 @@ class WeavePythonCodeGen:
                         self.add_action(transName, res)
                         res = f"movlr {fieldOffset}({temp1}) {ret.getAllocation()} 0 {size}"
                         self.add_action(transName, res)
+                        handlingPostOperator(inst, offsetReg)
                     else:
                         #  Note: The scale is incremented by 3 by the instruction. Hence, it only works for 8 byte
                         #  values.
-                        #        movwlr                    Xb                      Xs    inc, scale      Xd
-                        res += f"movwlr {inst.getPointerReg().getAllocation()}({offsetReg},0,0) {ret.getAllocation()}"
+                        if isinstance(inst.getOffsetDecl(), WeaveIRpostOperator):
+                            if inst.getOffsetDecl().instType == WIRinst.WeaveIRarithTypes.IADDITION:
+                                #        movwlr    Xs                                    Xb     inc, scale        Xd
+                                res += f"movwlr {inst.getPointerReg().getAllocation()}({offsetReg},1,0) {ret.getAllocation()}"
+                            else:
+                                res += f"movwlr {inst.getPointerReg().getAllocation()}({offsetReg},0,0) {ret.getAllocation()}"
+                                self.add_action(transName, res)
+                                res = f"subi {offsetReg} {offsetReg} 1"
+                        else:
+                            res += f"movwlr {inst.getPointerReg().getAllocation()}({offsetReg},0,0) {ret.getAllocation()}"
                         self.add_action(transName, res)
+
 
                 # If a signed sub word is copied from the scratchpad, the value has to be sign extended
                 if size != WIRinst.WeaveIRtypes.i64.getSize() and inst.getReturnReg().isSigned():
@@ -737,23 +788,68 @@ class WeavePythonCodeGen:
                 ops = [inst.label]
             else:
                 # The comparison operates on integers only. However, for the bit representation of the float
-                # reinterpreted as an integer, the operation still returns the correct result. The reason is that
+                # reinterpreted as an integer, the operation might return the correct result. The reason is that
                 # in case of e.g. float1 < float2, the mantissa of the larger float is also larger or the exponent of
                 # the larger float is larger, when the mantissa is the same.
-                # The only case, where this holds not true is when the sign bit is different and the size of the
-                # floating point differs. For instance, for a negative 32-bit float all bits from the MSB at
-                # position 63 down to position 30 are set to 1. This is not true for a negative double. Therefore,
-                # we exclude this case.
-                if (
-                        inst.left.dtype == WIRinst.WeaveIRtypes.float and
-                        inst.right.dtype == WIRinst.WeaveIRtypes.double or
-                        inst.left.dtype == WIRinst.WeaveIRtypes.double and
-                        inst.right.dtype == WIRinst.WeaveIRtypes.float
-                ):
-                    errorMsg(
-                        "Floating point values of different sizes cannot be compared",
-                        inst.getFileLocation(),
-                    )
+                # However, in FP arithmetic there are more states such as +/-INF and +/-NaN, which do not follow this
+                # rule. So, whenever a comparison between 2 FPs is required, we subtract the 2 FPs and check the
+                # result against 0. This way we can also correctly handle the special cases.
+                if (inst.dataType in [WIRinst.WeaveIRtypes.float, WIRinst.WeaveIRtypes.double] and
+                        not (isinstance(inst.right, WeaveIRimmediate) and inst.right.getValue() == 0)):
+                    tempRegUsed = True
+                    if isinstance(inst.right, WeaveIRregister) and inst.right.isTemp:
+                        tempReg = inst.right.getAllocation()
+                    elif isinstance(inst.left, WeaveIRregister) and inst.left.isTemp:
+                        tempReg = inst.left.getAllocation()
+                    else:
+                        tempReg = self.regAlloc.getTempReg(0, inst.ctx_event).name
+                        tempRegUsed = False
+                    leftOp = inst.left
+                    rightOp = inst.right
+
+                    if isinstance(leftOp, WeaveIRimmediate):
+                        if tempRegUsed:
+                            # we cannot use the temp register as source and destination register. Hence, we need to
+                            # move the immediate value to another temp register
+                            tempReg2 = self.regAlloc.getTempReg(1, inst.ctx_event)
+                            res += f"movir {tempReg2.name} {leftOp.name}"
+                            leftOp = tempReg2.name
+                        else:
+                            res += f"movir {tempReg.name} {leftOp.name}"
+                            leftOp = tempReg.name
+                        self.add_action(transName, res)
+                        res = ""
+                    else:
+                        leftOp = leftOp.getAllocation()
+                    if isinstance(rightOp, WeaveIRimmediate):
+                        if tempRegUsed:
+                            # we cannot use the temp register as source and destination register. Hence, we need to
+                            # move the immediate value to another temp register
+                            tempReg2 = self.regAlloc.getTempReg(1, inst.ctx_event)
+                            res += f"movir {tempReg2.name} {rightOp}"
+                            rightOp = tempReg2.name
+                        else:
+                            res += f"movir {tempReg.name} {rightOp}"
+                            rightOp = tempReg.name
+                        self.add_action(transName, res)
+                        res = ""
+                    else:
+                        rightOp = rightOp.getAllocation()
+
+                    if inst.dataType == WIRinst.WeaveIRtypes.float:
+                        operator = "fsub.32"
+                    else:
+                        operator = "fsub.64"
+
+                    res += f"{operator} {leftOp} {rightOp} {tempReg}"
+                    self.add_action(transName, res)
+                    res = ""
+
+                    # overwrite the input operands of the instruction
+                    inst.left.allocate(tempReg)
+                    inst.setRight(WeaveIRimmediate(inst.ctx, 0, inst.right.dtype))
+
+
                 ops, typ = self.get_ops_binaryInst(inst)
                 if inst.instType == WIRinst.WeaveIRBranchTypes.CONDITIONALEQ:
                     if typ == self.ArithOpsTypes.REG_IMM:
@@ -823,7 +919,8 @@ class WeavePythonCodeGen:
                     opCode = "ceq"
             elif (inst.instType == WIRinst.WeaveIRcompareTypes.UGREAT or
                   inst.instType == WIRinst.WeaveIRcompareTypes.ULESSEQ):
-                warningMsg("There is no support for unsigned greater than in ISAv2. Assuming signed")
+                warningMsg("There is no support for unsigned greater than in ISAv2. Assuming signed" +
+                           str(inst.getFileLocation()))
                 if typ == self.ArithOpsTypes.REG_IMM:
                     opCode = "cgti"
                 elif typ == self.ArithOpsTypes.REG_REG:
@@ -897,7 +994,8 @@ class WeavePythonCodeGen:
                     or (inReg.dtype.isInteger and outReg.dtype.isPointer)
             ):
                 # TODO: This can be optimized out, but we don't know how sub word sizes will be managed in the future
-                res += f"addi {inst.getInOps()[0].getAllocation()} {inst.getReturnReg().getAllocation()} 0"
+                # res += f"addi {inst.getInOps()[0].getAllocation()} {inst.getReturnReg().getAllocation()} 0"
+                return False # skip the cast operation
             elif inReg.dtype.isFloatingPoint and outReg.dtype.isFloatingPoint:
                 res += f"fcnvt.{getFPPrecision()} {inReg.getAllocation()} {outReg.getAllocation()}"
             elif (inReg.dtype.isFloatingPoint and outReg.dtype.isInteger or
@@ -910,23 +1008,13 @@ class WeavePythonCodeGen:
                     res += f"fcnvt.{precision} {inReg.getAllocation()} {outReg.getAllocation()}"
                 else:
                     if inReg.dtype.isInteger and outReg.dtype.isFloatingPoint:
-                        # first we convert the integer to the same size as the float
-                        res += f"addi {inReg.getAllocation()} {outReg.getAllocation()} 0"
-                        self.add_action(transName, res, f"casting i{inReg.dtype.getSize() * 8}."
-                                                        f"i{outReg.dtype.getSize() * 8}")
-                        # and then we convert the integer to float
-                        res = (
+                        res += (
                             f"fcnvt.i{outReg.dtype.getSize() * 8}.{outReg.dtype.mapToInstrName()} {outReg.getAllocation()} "
                             f"{outReg.getAllocation()}")
                     else:
-                        # first we convert the float into the same size as the integer
                         res += (
                             f"fcnvt.{inReg.dtype.mapToInstrName()}.i{inReg.dtype.getSize() * 8} {inReg.getAllocation()} "
                             f"{outReg.getAllocation()}")
-                        self.add_action(transName, res, f"casting {inReg.dtype.getSize() * 8}."
-                                                        f"i{inReg.dtype.getSize() * 8}")
-                        # and then convert the integer to float
-                        res = f"addi {outReg.getAllocation()} {outReg.getAllocation()} 0"
             else:
                 errorMsg(
                     f"Unsupported cast from {inReg.dtype.name} to {outReg.dtype.name}",
@@ -1000,22 +1088,35 @@ class WeavePythonCodeGen:
                     op_num += 1
                 return None, None
 
+            def oneHot(value) -> bool:
+                return (value & (value - 1)) == 0
+
             origin = original_evw.getAllocation()
             for i in range(0, 4):
+                # If this is the last instruction to be generated (mask has only 1 bit set), make sure, that we use
+                # the destination register.
+                # If it is not the last instruction, then use the input register. Here, the input register could be
+                # the destination register in case the developer wrote
+                #     unsigned long var = evw_new(someNetID, someEvent);
+                # or a temporary variable, if the developer wrote
+                #     someVar = evw_new(someVar, someEvent);
+                if oneHot(mask):
+                    dest = result_reg.getAllocation()
+                else:
+                    dest = origin
+
                 if mask & (1 << i):
                     op = update_ops[op_num]
                     next_op_idx, next_op = getNextOpSameType(i + 1, op_num + 1, op, result_reg)
                     if next_op_idx is None:
                         if isinstance(op, WeaveIRimmediate) or isinstance(op, WeaveIRsymPtr):
-                            res += f"evi {origin} {result_reg.getAllocation()} {op.name} {1 << i}"
+                            #res += f"evi {origin} {result_reg.getAllocation()} {op.name} {1 << i}"
+                            res += f"evi {origin} {dest} {op.name} {1 << i}"
                         else:
-                            res += f"ev {origin} {result_reg.getAllocation()} {op.getAllocation()} {op.getAllocation()} {1 << i}"
+                            #res += f"ev {origin} {result_reg.getAllocation()} {op.getAllocation()} {op.getAllocation()} {1 << i}"
+                            res += f"ev {origin} {dest} {op.getAllocation()} {op.getAllocation()} {1 << i}"
                     else:
-                        if (
-                                isinstance(op, WeaveIRimmediate)
-                                or isinstance(op, WeaveIRsymPtr)
-                                and result_reg
-                        ):
+                        if isinstance(op, WeaveIRimmediate) or isinstance(op, WeaveIRsymPtr) and result_reg:
                             res += (
                                     f"evii {original_evw.getAllocation()} "
                                     + f"{op.name} {next_op.name} {(1 << i) | (1 << next_op_idx)}"
@@ -1032,8 +1133,6 @@ class WeavePythonCodeGen:
                     op_num += 1
                     self.add_action(transName, res)
                     res = ""
-                    # Change the origin to the result register for the upcoming instructions
-                    origin = result_reg.getAllocation()
 
         elif isinstance(inst, WeaveIRcopyOperands):
             ops = inst.getInOps()
@@ -1103,6 +1202,11 @@ class WeavePythonCodeGen:
         elif isinstance(inst, WeaveIRphi):
             errorMsg(f"Instruction {type(inst)} should have been removed before lowering. Something went wrong! {inst}")
             return False
+        elif isinstance(inst, WeaveIRpostOperator):
+            op = "addi" if inst.instType == WIRinst.WeaveIRarithTypes.IADDITION else "subi"
+            ops = [inst.getReturnReg().getAllocation(), inst.getAsOperand().getAllocation(), 1]
+            res += self.create_inst_format(op, ops)
+            self.add_action(transName, res)
         else:
             warningMsg(f"Instruction {type(inst)} not supported for lowering yet")
             return False
@@ -1124,9 +1228,9 @@ class WeavePythonCodeGen:
                     )
             elif not d.isStatic and not d.isConstant:
 
-                def addComments(ty: WeaveIRstructDecl, name: str):
+                def addComments(ty: WeaveIRStructTypeDecl, name: str):
                     for field in ty.getFields():
-                        if isinstance(field, WeaveIRstructDecl):
+                        if isinstance(field, WeaveIRStructTypeDecl):
                             addComments(field, name + "." + field.name)
                         elif not isinstance(field, WeaveIRpadding):
                             self.add_line(
@@ -1138,6 +1242,7 @@ class WeavePythonCodeGen:
 
     def traverse(self):
         debugMsg(5, "Starting PythonCodeGen")
+        self._addUDWVersion()
         self.globalConstantsTranslate()
         self.programTranslate()
         return "\n".join(self.out)

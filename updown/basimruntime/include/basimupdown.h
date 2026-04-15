@@ -120,9 +120,6 @@ private:
   std::unordered_map<uint32_t, uint32_t> symbolMap;
 
   std::chrono::high_resolution_clock::time_point startTime;
-
-  event_t send_event_ev;
-  uint32_t send_event_valid;
   
 #if defined (ENABLE_SQLITE)
   // Database for storing stats
@@ -206,7 +203,7 @@ private:
    */
   int getUDIdx(basim::networkid_t);
   
-  int getUDIdxForAddr(basim::networkid_t, basim::Addr, bool isGlobal);
+  std::pair<uint32_t, uint32_t> getUDLaneForPolicy7(basim::networkid_t, basim::Addr, bool isGlobal);
 
   /**
    * @brief Send event operands from the sender queues to the receiver lane.
@@ -219,40 +216,56 @@ private:
   
   uint64_t getVirtualAddr(int sourceUDID, uint64_t addr, bool isGlobal);
 
+  /* network */
+  std::vector<int> current_cycle;
+  std::vector<int> timeline_index;
+  std::vector<int> interval_cycles;
+  std::vector<double> current_traffic;
+  std::vector<double> current_packet_count;
+
 public:
 
-//   uint64_t nnodes;
-  uint64_t nnodes_end;
-//   uint64_t nodeID;
   uint64_t numUDperNode;
   basim::BufferPtr receive_message_queue;
   basim::BufferPtr send_message_queue[32];
-//   uint64_t status;  // 0: normal, 1:upodown start, 2: upodown end, 3: sync, 4: end
-  std::atomic<int> status; // 0: normal, 1:upodown start, 2: upodown end, 3: sync, 4: end
+  /* count barrier times*/
+  std::atomic<int> status; 
   std::atomic<int> barrier_times_atomic;
+
+  /* thread lock*/
   pthread_mutex_t mutex, top_lock;
-  pthread_cond_t condStart, condTest;
-  networkid_t* test_nwid;
-  uint32_t* test_offset;
-  word_t* test_expected;
-  int* test_addr_flag;
-  sem_t semStart;
-  sem_t *semSync;
-  sem_t *semTest;
-
-  pthread_mutex_t map_lock;
-  std::map<pthread_t, int> thread_map;
-  std::atomic<int> thread_num;
-
+  
+  /* network bandwidth limitation */
   uint64_t network_output_limit;
+  /* number of simTicks iterations */
   double num_start_exe;
+  /* shrink gobal memory between global_memory_node_start and global_memory_node_end UpDown nodes*/
+  uint64_t global_memory_node_start;
+  uint64_t global_memory_node_end;
+  /**
+   * @brief Set Global Memory Node Range
+   *
+   * global_memory_node_start = start;
+   * global_memory_node_end = end;
+   * This function can be only call once before dramalloc, best position is called just after constructing a new BASimUDRuntime_t object
+   * 
+   */
+  void set_global_memory_node_range(uint64_t start, uint64_t end);
 
 
-
+  /**
+   * @brief barrer function, use to synchronize on multiple top program like dramalloc test
+   *
+   * set_barrier_times will set the number of barriers, after barrier_times barreir function called, all barreir function free
+   * 
+   */
   uint64_t get_status();
   void set_status(uint64_t _status);
   uint64_t get_barrier_times() override;
   void set_barrier_times(uint64_t _barrier_times) override;
+  void barrier(uint64_t barrier_id) override;
+  void barrier() override;
+
 
 
 
@@ -297,16 +310,12 @@ public:
   BASimUDRuntime_t(ud_machine_t machineConfig, std::string programFile, basim::Addr pgbase, uint64_t nnodes, uint64_t nodeID, uint64_t numUDperNode, uint64_t top_per_node=1, uint32_t numTicks=NUMTICKS,
     std::string log_subfolder_name="");
 
-  void barrier(uint64_t barrier_id) override;
-  void barrier() override;
-
   /**
    * @brief Wrapper function for send_event
    *
    * Calls the emulator and calls the UDRuntime_t::send_event() function
    */
   void send_event(event_t ev) override;
-  void send_event2(event_t ev);
 
   /**
    * @brief Wrapper function for start_exec
@@ -490,6 +499,7 @@ public:
   void print_stats(uint32_t ud_id, uint8_t lane_num);
   void print_stats(uint32_t lane_num);
   void print_curr_cycle(void);
+  void print_ud_stats(uint32_t ud_id);
   void print_node_stats(uint32_t nodeID);
   void reset_node_stats();
   void reset_curr_cycle(void);
@@ -523,10 +533,24 @@ public:
   common_addr mapSA2PA(basim::Addr addr, uint8_t isGlobal);
   common_addr mapPA2SA(basim::Addr addr, uint8_t isGlobal);
 
+  /**
+  * @brief thread lock when multiple top threads run same basim_runtime
+  *
+  */
   void lock() override;
   void unlock() override;
 
+  /**
+  * @brief reorder the free UpDown thread ID on each lane from smallest to largest
+  *
+  */
   void reorder_freetids() override;
+
+  /**
+  * @brief Update node stats for network stats
+  *
+  */
+  void update_node_stats();
 };
 
 } // namespace UpDown

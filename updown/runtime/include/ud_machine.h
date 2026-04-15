@@ -61,7 +61,9 @@ struct ud_machine_t {
   uint64_t MemBandwidth = DEF_MEM_BANDWIDTH;  // Memory Bandwidth
   uint64_t InterNodeLatency = DEF_INTER_NODE_LATENCY; // Inter Node Latency
   uint64_t InterNodeBandwidth = DEF_INTER_NODE_BANDWIDTH; // Inter Node Bandwidth (GB/s per node)
-  
+
+  uint64_t MemQueueWarningSize = DEF_MEM_QUEUE_WARNING_RATIO_VS_LITTLE * DEF_MEM_BANDWIDTH * DEF_MEM_LATENCY / 2 / 64; // 2 for 2 GHz, 64 for 64B access
+  uint64_t MemQueueWarningInterval = DEF_MEM_QUEUE_WARNING_INTERVAL;
   private:
     uint64_t convertStr2Long(char *c) {
       std::string str(c);

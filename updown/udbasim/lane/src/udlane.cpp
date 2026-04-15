@@ -498,7 +498,7 @@ namespace basim
                         if(ts == nullptr){
 #ifndef BASIM_STANDALONE
                             if(!(curr_event.getThreadID() == 0xFF)){
-                                printf("[NWID :%u] Invalid or terminated Thread ID %d in event word with event label = %d\n", this->nwid.networkid, curr_event.getThreadID(), curr_event.getEventLabel());
+                                printf("[NWID :%u] Invalid or terminated Thread ID %d in event word with event label = %s\n", this->nwid.networkid, curr_event.getThreadID(), archstate->instmem->getSymbolName(curr_event.getEventLabel()).c_str());
                                 exit(1);
                             }
 #endif
@@ -819,9 +819,11 @@ namespace basim
                 this->output_count += 64;
                 this->stack_stats->dram_store_count++;
                 this->stack_stats->dram_store_bytes += m->getLen() * WORDSIZE;
+                this->stack_stats->dram_store_word_hist[m->getLen() - 1]++;
             }else{
                 this->stack_stats->dram_load_count++;
                 this->stack_stats->dram_load_bytes += m->getLen() * WORDSIZE;
+                this->stack_stats->dram_load_word_hist[m->getLen() - 1]++;
             }
             BASIM_WARNING_IF((m->getdestaddr() & 0x003f) + m->getLen() * 8 > 64, "Warning: Message is crossing the boundary\n");
             this->_message_time_stamp.pop();

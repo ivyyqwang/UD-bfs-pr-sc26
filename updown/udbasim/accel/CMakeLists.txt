@@ -6,6 +6,7 @@ include_directories(BEFORE
   ../common/include
   ../isa/include
   ../lane/include
+  ../../runtime/include
 )
 
 add_library(UDAccelerator SHARED src/udaccelerator.cpp)

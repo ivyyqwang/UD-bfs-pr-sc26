@@ -30,12 +30,16 @@ private:
 
   uint64_t curTimeStamp;
 
+  uint64_t warning_size;
+  uint64_t warning_interval;
+
+  std::vector<uint64_t> lastWarning;
 public:
   /* Null Constructor */
   UDMemory() : udnodeid(0), numStacks(8){};
 
   /* Accelerator Constructor with id, numStacks */
-  UDMemory(uint32_t _udnodeid, uint32_t _numStacks, uint64_t latency, uint64_t bandwidth, uint64_t inter_node_latency);
+  UDMemory(uint32_t _udnodeid, uint32_t _numStacks, uint64_t latency, uint64_t bandwidth, uint64_t inter_node_latency, uint64_t _warning_size, uint64_t _warning_interval);
 
   /* Idle Check */
   bool isIdle();

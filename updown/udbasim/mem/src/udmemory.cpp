@@ -5,10 +5,11 @@
 
 namespace basim
 {   
-    UDMemory::UDMemory(uint32_t _udnodeid, uint32_t _numStacks, uint64_t latency, uint64_t bandwidth, uint64_t inter_node_latency) : udnodeid(_udnodeid), numStacks(_numStacks) {
+    UDMemory::UDMemory(uint32_t _udnodeid, uint32_t _numStacks, uint64_t latency, uint64_t bandwidth, uint64_t inter_node_latency, uint64_t _warning_size, uint64_t _warning_interval) : udnodeid(_udnodeid), numStacks(_numStacks), warning_size(_warning_size), warning_interval(_warning_interval) {
         for (auto i = 0; i < _numStacks; i++) {
             UDMemPtr mem = new UDMem(latency, bandwidth, inter_node_latency);
             udMems.push_back(mem);
+            lastWarning.push_back(0);
         }
     }
 
@@ -30,6 +31,11 @@ namespace basim
     void UDMemory::tick(uint64_t timestamp) {
         for (auto i = 0; i < this->numStacks; i++) {
             udMems[i]->tick(timestamp);
+            if (warning_size > 0 && udMems[i]->getQueueSize() > warning_size && ((lastWarning[i] == 0) || (udMems[i]->getTime() > lastWarning[i] + warning_interval))) {
+                lastWarning[i] = udMems[i]->getTime();
+                BASIM_WARNING("Warning: Memory Controller Queue at (Node %d, Stack %d) is crossing the boundary with size %ld", udnodeid, i, udMems[i]->getQueueSize());
+                // BASIM_PRINT("Warning at cycle %ld: Memory Controller Queue at (Node %d, Stack %d) is crossing the boundary with size %ld", udMems[i]->getTime(), udnodeid, i, udMems[i]->getQueueSize());
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <memory>
 #include <vector>
+#include <iostream>
 
 #include "alloc.h"
 
@@ -127,16 +128,49 @@ void Allocator::free(uint64_t start, size_t size, size_t blockSize, uint64_t nbN
   if (size == 0 || blockSize == 0 || nbNodes == 0)
     return;
 
-  /* transform the request for a search query */
-  Rect req;
-  req.start[MEMDIM] = start;
-  req.start[NODEDIM] = startNode;
-
   /* length of the memory allocation on the first node */
   size_t sizeInBlocks = (size / blockSize);
+  if (size % blockSize)
+    sizeInBlocks++;
   bool isFullRect = sizeInBlocks % nbNodes == 0;
-  req.len[MEMDIM] = ((sizeInBlocks / nbNodes) + (isFullRect ? 0 : 1)) * blockSize;
+
+  uint64_t memLength = ((sizeInBlocks / nbNodes) + (isFullRect ? 0 : 1)) * blockSize;
+  uint64_t nodeLength = nbNodes;
+
+  /* sanity check: no alloc if we're being asked for less than one block
+   * per node
+   */
+  if (sizeInBlocks < nodeLength) {
+    std::cerr << "wrong size!\n";
+    return;
+  }
+
+  /* the rtree should only contain rectangles, so we might need two blocks:
+   *
+   *      |x|x|x|x|       |x|x|x|x|
+   *      |x|x|x|x|       |x|x|x|x|
+   *      |x|x|x|x|  or   |a|a| | |
+   *
+   * (mem is vert axis, nodes is horizontal axis)
+   **/
+  /* transform the request for a search query */
+  Rect req, a;
+  req.start[MEMDIM] = start;
+  req.start[NODEDIM] = startNode;
+  req.len[MEMDIM] = memLength;
   req.len[NODEDIM] = nbNodes;
+
+  if(!isFullRect) {
+	req.len[MEMDIM] -= blockSize;
+
+	a.start[MEMDIM] = start + memLength - blockSize;
+	a.start[NODEDIM] = startNode;
+	a.len[MEMDIM] = blockSize;
+	a.len[NODEDIM] = sizeInBlocks % nbNodes;
+
+	Block newa = {a, blockSize};
+	this->freeBlocks.add(newa);
+  }
 
   /* insert it in the rtree */
   Block newb = {req, blockSize};

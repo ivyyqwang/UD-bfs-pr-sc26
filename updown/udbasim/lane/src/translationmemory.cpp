@@ -32,6 +32,32 @@ namespace basim
         // gs.print_info();
     }
 
+    void TranslationMemory::clearAllTrans() {
+        BASIM_INFOMSG("Updown %d clears all translation entries", udid);
+        private_segments.clear();
+        global_segments.clear();
+    }
+
+    void TranslationMemory::removeLocalTrans(Addr virtual_base) {
+        for (auto it = private_segments.begin(); it != private_segments.end(); ++it) {
+            if (it->getVirtualBase() == virtual_base) {
+                BASIM_INFOMSG("Updown %d removes private translation entry with virtual base = %ld(0x%lx)", udid, virtual_base, virtual_base);
+                private_segments.erase(it);
+                break;
+            }
+        }
+    }
+
+    void TranslationMemory::removeGlobalTrans(Addr virtual_base) {
+        for (auto it = global_segments.begin(); it != global_segments.end(); ++it) {
+            if (it->getVirtualBase() == virtual_base) {
+                BASIM_INFOMSG("Updown %d removes global translation entry with virtual base = %ld(0x%lx)", udid, virtual_base, virtual_base);
+                global_segments.erase(it);
+                break;
+            }
+        }
+    }
+
     Addr TranslationMemory::translate_va2pa(Addr addr, int num_words) {
         BASIM_INFOMSG("Validating DRAM address on updown %d: %lu(0x%lx) length: %d", udid, addr, addr, num_words);
         // Direct mapping if no translation entry is added

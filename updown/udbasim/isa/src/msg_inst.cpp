@@ -35,15 +35,15 @@ Cycles exeInstSend(ArchState& ast, EncInst inst) {
   EventWord ev = EventWord(tst->readReg(extrInstSendXe(inst)));
   ev.setNumOperands(len - 2);
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(ev.getNWID()),
-    "Translation failed for nwid %d on nwid %d tid %d, INSTR=%u SEND dest_ev_reg=X%d data_ptr_reg=X%d cont_reg=X%d", \
-    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendXe(inst), (int) extrInstSendXptr(inst), (int) extrInstSendXc(inst));
+    "Translation failed for nwid %d on nwid %d tid %d event %s, INSTR=%u SEND dest_ev_reg=X%d data_ptr_reg=X%d cont_reg=X%d", \
+    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendXe(inst), (int) extrInstSendXptr(inst), (int) extrInstSendXc(inst));
   std::unique_ptr<MMessage> m(new MMessage(contword, ev, MType::M1Type));
   m->setSrcEventWord(EventWord(tst->readReg(RegId::X2)));
   m->setLen(len);
   Addr spdAddr = tst->readReg(Xptr);
   BASIM_ERROR_IF(!ast.transmem->validate_sp_addr(spdAddr, len << 3),
-    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d, INSTR=%u SEND src_reg=X%d cont_reg=X%d", \
-    spdAddr, spdAddr, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendXptr(inst), (int) extrInstSendXc(inst));
+    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d event %s, INSTR=%u SEND src_reg=X%d cont_reg=X%d", \
+    spdAddr, spdAddr, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendXptr(inst), (int) extrInstSendXc(inst));
 
   word_t* dataptr = new word_t[len];
   for(auto i = 0; i < len; i++){
@@ -155,8 +155,8 @@ Cycles exeInstSendm(ArchState& ast, EncInst inst) {
     contword.setNumOperands(len - 1);
   // Verify the NWID
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(contword.getNWID()),
-    "Translation failed for continuation nwid %d on nwid %d tid %d, INSTR=%u SENDM src_reg=X%d cont_reg=X%d", \
-    contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendmXptr(inst), (int) extrInstSendmXc(inst));
+    "Translation failed for continuation nwid %d on nwid %d tid %d event %s, INSTR=%u SENDM src_reg=X%d cont_reg=X%d", \
+    contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendmXptr(inst), (int) extrInstSendmXc(inst));
   RegId Xptr = extrInstSendmXptr(inst);
   std::unique_ptr<MMessage> m(new MMessage(contword, EventWord(0), MType::M2Type));
   m->setSrcEventWord(EventWord(tst->readReg(RegId::X2)));
@@ -164,8 +164,8 @@ Cycles exeInstSendm(ArchState& ast, EncInst inst) {
   if(ldst){ // if store
     Addr spdAddr = tst->readReg(Xptr);
     BASIM_ERROR_IF(!ast.transmem->validate_sp_addr(spdAddr, len << 3),
-      "Translation failed for address 0x%lx (%lu) on nwid %d tid %d, INSTR=%u SENDM (store) src_reg=X%d cont_reg=X%d len=%ld", \
-      spdAddr, spdAddr, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendmXptr(inst), (int) extrInstSendmXc(inst), len);
+      "Translation failed for address 0x%lx (%lu) on nwid %d tid %d event %s, INSTR=%u SENDM (store) src_reg=X%d cont_reg=X%d len=%ld", \
+      spdAddr, spdAddr, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendmXptr(inst), (int) extrInstSendmXc(inst), len);
     word_t* dataptr = new word_t[len];
     for(auto i = 0; i < len; i++) {
       dataptr[i] = spd->readWord(spdAddr + 8 * i); 
@@ -186,8 +186,8 @@ Cycles exeInstSendm(ArchState& ast, EncInst inst) {
   Addr virtual_addr = static_cast<Addr>(tst->readReg(extrInstSendmXd(inst)));
   Addr physical_addr = ast.transmem->translate_va2pa(virtual_addr, len);
   BASIM_ERROR_IF(ast.transmem->get_enable_translation() && physical_addr == ast.transmem->INVALID_ADDR,
-    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d, INSTR=%u Sendm dest_reg=X%d cont_reg=X%d", \
-    tst->readReg(extrInstSendmXd(inst)), tst->readReg(extrInstSendmXd(inst)), tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendmXd(inst), (int) extrInstSendmXc(inst));
+    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d event %s, INSTR=%u Sendm dest_reg=X%d cont_reg=X%d", \
+    tst->readReg(extrInstSendmXd(inst)), tst->readReg(extrInstSendmXd(inst)), tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendmXd(inst), (int) extrInstSendmXc(inst));
   m->setdestaddr(physical_addr);
   m->setMode(mode);
   m->setIsGlobal(ast.transmem->isGlobal(virtual_addr));
@@ -276,8 +276,8 @@ Cycles exeInstSendr(ArchState& ast, EncInst inst) {
   EventWord ev = EventWord(tst->readReg(extrInstSendrXe(inst)));
   ev.setNumOperands(len - 2);
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(ev.getNWID()),
-    "Translation failed for nwid %d on nwid %d tid %d, INSTR=%u SENDR dest_ev_reg=X%d data_reg=X%d X%d cont_reg=X%d", \
-    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendrXe(inst), (int) extrInstSendrX1(inst), (int) extrInstSendrX2(inst), (int) extrInstSendrXc(inst));
+    "Translation failed for nwid %d on nwid %d tid %d event %s, INSTR=%u SENDR dest_ev_reg=X%d data_reg=X%d X%d cont_reg=X%d", \
+    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendrXe(inst), (int) extrInstSendrX1(inst), (int) extrInstSendrX2(inst), (int) extrInstSendrXc(inst));
   std::unique_ptr<MMessage> m(new MMessage(contword, ev, MType::M3Type));
   m->setSrcEventWord(EventWord(tst->readReg(RegId::X2)));
   m->setLen(len);
@@ -349,8 +349,8 @@ Cycles exeInstSendr3(ArchState& ast, EncInst inst) {
   EventWord ev = EventWord(tst->readReg(extrInstSendr3Xe(inst)));
   ev.setNumOperands(len - 2);
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(ev.getNWID()),
-    "Translation failed for nwid %d on nwid %d tid %d, INSTR=%u SENDR3 dest_ev_reg=X%d data_reg=X%d X%d X%d cont_reg=X%d", \
-    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendr3Xe(inst), (int) extrInstSendr3X1(inst), (int) extrInstSendr3X2(inst), (int) extrInstSendr3X3(inst), (int) extrInstSendr3Xc(inst));
+    "Translation failed for nwid %d on nwid %d tid %d event %s, INSTR=%u SENDR3 dest_ev_reg=X%d data_reg=X%d X%d X%d cont_reg=X%d", \
+    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendr3Xe(inst), (int) extrInstSendr3X1(inst), (int) extrInstSendr3X2(inst), (int) extrInstSendr3X3(inst), (int) extrInstSendr3Xc(inst));
   std::unique_ptr<MMessage> m(new MMessage(contword, ev, MType::M3Type));
   m->setSrcEventWord(EventWord(tst->readReg(RegId::X2)));
   word_t dataptr[3];
@@ -420,8 +420,8 @@ Cycles exeInstSendmr(ArchState& ast, EncInst inst) {
   contword = EventWord(tst->readReg(Xc));
   // Verify the NWID
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(contword.getNWID()),
-    "Translation failed for cont nwid %d on nwid %d tid %d, INSTR=%u SENDMR  data_reg=X%d cont_reg=X%d", \
-      contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendmrX1(inst), (int) extrInstSendmrXc(inst));
+    "Translation failed for cont nwid %d on nwid %d tid %d event %s, INSTR=%u SENDMR  data_reg=X%d cont_reg=X%d", \
+      contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendmrX1(inst), (int) extrInstSendmrXc(inst));
   RegId X1 = extrInstSendmrX1(inst);
   RegId Xd = extrInstSendmrXd(inst);
   std::unique_ptr<MMessage> m(new MMessage(contword, EventWord(), MType::M3Type_M));
@@ -435,8 +435,8 @@ Cycles exeInstSendmr(ArchState& ast, EncInst inst) {
   Addr virtual_addr = static_cast<Addr>(tst->readReg(Xd));
   Addr physical_addr = ast.transmem->translate_va2pa(virtual_addr, len);
   BASIM_ERROR_IF(physical_addr == ast.transmem->INVALID_ADDR,
-    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d, INSTR=%u Sendmr dest_reg=X%d cont_reg=X%d", \
-    virtual_addr, virtual_addr, tst->getNWIDbits(), tst->getTID(), inst, (int) Xd, (int) Xc);
+    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d event %s, INSTR=%u Sendmr dest_reg=X%d cont_reg=X%d", \
+    virtual_addr, virtual_addr, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) Xd, (int) Xc);
   m->setdestaddr(physical_addr);
   m->setIsGlobal(ast.transmem->isGlobal(virtual_addr));
   lnstats->dram_store_bytes += 8 * len;
@@ -486,8 +486,8 @@ Cycles exeInstSendmr2(ArchState& ast, EncInst inst) {
   contword = EventWord(tst->readReg(Xc));
   // Verify the NWID
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(contword.getNWID()),
-    "Translation failed for cont nwid %d on nwid %d tid %d, INSTR=%u SENDMR2 dest_addr_reg=X%d data_reg=X%d cont_reg=X%d", \
-    contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendmr2Xd(inst), (int) extrInstSendmr2X1(inst), (int) extrInstSendmr2Xc(inst));
+    "Translation failed for cont nwid %d on nwid %d tid %d event %s, INSTR=%u SENDMR2 dest_addr_reg=X%d data_reg=X%d cont_reg=X%d", \
+    contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendmr2Xd(inst), (int) extrInstSendmr2X1(inst), (int) extrInstSendmr2Xc(inst));
   RegId X1 = extrInstSendmr2X1(inst);
   RegId X2 = extrInstSendmr2X2(inst);
   RegId Xd = extrInstSendmr2Xd(inst);
@@ -503,8 +503,8 @@ Cycles exeInstSendmr2(ArchState& ast, EncInst inst) {
   Addr virtual_addr = static_cast<Addr>(tst->readReg(Xd));
   Addr physical_addr = ast.transmem->translate_va2pa(virtual_addr, len);
   BASIM_ERROR_IF(physical_addr == ast.transmem->INVALID_ADDR,
-    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d, INSTR=%u Sendmr2 dest_reg=X%d cont_reg=X%d", \
-    virtual_addr, virtual_addr, tst->getNWIDbits(), tst->getTID(), inst, (int) Xd, (int) Xc);
+    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d event %s, INSTR=%u Sendmr2 dest_reg=X%d cont_reg=X%d", \
+    virtual_addr, virtual_addr, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) Xd, (int) Xc);
   m->setdestaddr(physical_addr);
   m->setIsGlobal(ast.transmem->isGlobal(virtual_addr));
   lnstats->dram_store_bytes += 8 * len;
@@ -576,8 +576,8 @@ Cycles exeInstSendops(ArchState& ast, EncInst inst) {
   EventWord ev = EventWord(tst->readReg(extrInstSendopsXe(inst)));
   ev.setNumOperands(len - 2);
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(ev.getNWID()), 
-    "Translation failed for nwid %d on nwid %d tid %d, INSTR=%u SENDOPS dest_ev_reg=X%d data_reg=X%d cont_reg=X%d", \
-    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendopsXe(inst), (int) extrInstSendopsXop(inst), (int) extrInstSendopsXc(inst));
+    "Translation failed for nwid %d on nwid %d tid %d event %s, INSTR=%u SENDOPS dest_ev_reg=X%d data_reg=X%d cont_reg=X%d", \
+    ev.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendopsXe(inst), (int) extrInstSendopsXop(inst), (int) extrInstSendopsXc(inst));
 
   std::unique_ptr<MMessage> m(new MMessage(contword, ev, MType::M4Type));
   m->setSrcEventWord(EventWord(tst->readReg(RegId::X2)));
@@ -653,8 +653,8 @@ Cycles exeInstSendmops(ArchState& ast, EncInst inst) {
   }
   // Verify the NWID
   BASIM_ERROR_IF(!ast.transmem->validate_nwid(contword.getNWID()),
-    "Translation failed for cont nwid %d on nwid %d tid %d, INSTR=%u SENDMOPS dest_ev_reg=X%d data_reg=X%d cont_reg=X%d", \
-    contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), inst, (int) extrInstSendmopsXe(inst), (int) extrInstSendmopsXop(inst), (int) extrInstSendmopsXc(inst));
+    "Translation failed for cont nwid %d on nwid %d tid %d event %s, INSTR=%u SENDMOPS dest_ev_reg=X%d data_reg=X%d cont_reg=X%d", \
+    contword.getNWID().networkid, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) extrInstSendmopsXe(inst), (int) extrInstSendmopsXop(inst), (int) extrInstSendmopsXc(inst));
   RegId Xop = extrInstSendmopsXop(inst);
   RegId Xd = extrInstSendmopsXd(inst);
   uint8_t regid = static_cast<uint8_t>(Xop);
@@ -675,8 +675,8 @@ Cycles exeInstSendmops(ArchState& ast, EncInst inst) {
   Addr virtual_addr = static_cast<Addr>(tst->readReg(Xd));
   Addr physical_addr = ast.transmem->translate_va2pa(virtual_addr, len);
   BASIM_ERROR_IF(physical_addr == ast.transmem->INVALID_ADDR,
-    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d, INSTR=%u Sendmops dest_reg=X%d cont_reg=X%d", \
-    virtual_addr, virtual_addr, tst->getNWIDbits(), tst->getTID(), inst, (int) Xd, (int) extrInstSendmopsXc(inst));
+    "Translation failed for address 0x%lx (%lu) on nwid %d tid %d event %s, INSTR=%u Sendmops dest_reg=X%d cont_reg=X%d", \
+    virtual_addr, virtual_addr, tst->getNWIDbits(), tst->getTID(), ast.instmem->getSymbolName(tst->getEventWord().getEventLabel()).c_str(), inst, (int) Xd, (int) extrInstSendmopsXc(inst));
   m->setdestaddr(physical_addr);
   m->setIsGlobal(ast.transmem->isGlobal(virtual_addr));
   ast.sendbuffer->push(std::move(m));
@@ -733,6 +733,12 @@ Cycles exeInstInstrans(ArchState& ast, EncInst inst) {
     BASIM_INFOMSG("Lane %d inserts global translation\n", tst->getNWIDbits());
     uint64_t swizzle = tst->readReg(extrInstInstransX4(inst));
     ast.transmem->insertGlobalTrans(virtual_base, physical_base, size, swizzle, extrInstInstransPerm(inst));
+  } else if (mode == 2) {
+    BASIM_INFOMSG("Lane %d removes local translation, va_base=%lu(0x%lx)\n", tst->getNWIDbits(), virtual_base, virtual_base);
+    ast.transmem->removeLocalTrans(virtual_base);
+  } else if (mode == 3) {
+    BASIM_INFOMSG("Lane %d removes global translation, segment_base=%lu(0x%lx)\n", tst->getNWIDbits(), virtual_base, virtual_base);
+    ast.transmem->removeGlobalTrans(virtual_base);
   } else {
     BASIM_ERROR("Invalid mode for instrans instruction");
   }

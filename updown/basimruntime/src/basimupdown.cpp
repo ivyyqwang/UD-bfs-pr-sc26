@@ -127,69 +127,46 @@ BASimUDRuntime_t::BASimUDRuntime_t(ud_machine_t machineConfig, std::string progr
 }
 
 void BASimUDRuntime_t::initialize(uint64_t numUDperNode, uint64_t nnodes, uint64_t topPerNode) {
-    #ifdef ASST_FASTSIM
-        for (uint64_t i = 0; i < this->MachineConfig.NumUDs * this->MachineConfig.NumStacks; i++) {
-            std::vector<struct BASimStats> v(this->MachineConfig.NumLanes);
-            this->simStats.push_back(v);
-        }
+    for(uint64_t i = 0; i < this->MachineConfig.NumUDs * this->MachineConfig.NumStacks * this->MachineConfig.NumNodes; i++) {
+        std::vector<struct BASimStats> v(this->MachineConfig.NumLanes);
+        this->simStats.push_back(v);
+    }
 
-        std::vector<struct BASimNodeStats> v(nnodes);
-        this->simNodeStats.push_back(v);
+    for(uint64_t i=0; i<this->MachineConfig.NumNodes; ++i) {
+        struct BASimNodeStats stats;
+        stats.initialize(this->MachineConfig.NumNodes);
+        this->simNodeStats.push_back(stats);
+    }
 
-        this->nnodes = nnodes;
-        this->numUDperNode = numUDperNode;
-        pthread_mutex_init(&mutex, nullptr);
-        pthread_mutex_init(&top_lock, nullptr);
-        pthread_cond_init(&condStart, nullptr);
-        pthread_cond_init(&condTest, nullptr);
-        sem_init(&semStart, 0, 0);
-        set_status(0);
-        nnodes_end = 0;
-        // initialize message_list
-        receive_message_queue = new basim::Buffer<std::unique_ptr<basim::MMessage> >(0);
-        for(int i=0; i<this->numUDperNode; i++) 
-            send_message_queue[i] = new basim::Buffer<std::unique_ptr<basim::MMessage> >(0); 
-    #else
-        for(uint64_t i = 0; i < this->MachineConfig.NumUDs * this->MachineConfig.NumStacks * this->MachineConfig.NumNodes; i++) {
-            std::vector<struct BASimStats> v(this->MachineConfig.NumLanes);
-            this->simStats.push_back(v);
-        }
+    current_cycle.clear();
+    timeline_index.clear();
+    interval_cycles.clear();
+    current_traffic.clear();
+    current_packet_count.clear();
 
-        for(uint64_t i=0; i<this->MachineConfig.NumNodes; ++i) {
-            struct BASimNodeStats stats;
-            stats.reset(this->MachineConfig.NumNodes);
-            this->simNodeStats.push_back(stats);
-        }
+    uint64_t upperLimit = this->MachineConfig.NumNodes;
+    current_cycle.resize(upperLimit, 0);
+    timeline_index.resize(upperLimit, 0);
+    interval_cycles.resize(upperLimit, 1);
+    current_traffic.resize(upperLimit, 0);
+    current_packet_count.resize(upperLimit, 0);
 
-        this->nnodes = 1;
-    #endif
+    set_global_memory_node_range(0,nnodes-1);
+
+    this->nnodes = 1;
+
     nodeID = 0;
     python_enabled = false;
-    send_event_valid = 0;
     this->topPerNode = topPerNode;
     barrier_times = this->nnodes*this->topPerNode;
     set_barrier_times(barrier_times);
     
     this->startTime = std::chrono::high_resolution_clock::now();
     UpDown::curRuntimeInstance = this;
-    
-    pthread_mutex_init(&map_lock, nullptr);
-    thread_num.store(0, std::memory_order_release);
-    test_nwid = new networkid_t[this->topPerNode];
-    test_offset = new uint32_t[this->topPerNode];
-    test_expected = new word_t[this->topPerNode];
-    #ifdef ASST_FASTSIM
-        semSync = new sem_t[this->topPerNode];
-        for(int i=0; i<this->topPerNode; i++)
-            sem_init(&semSync[i], 0, 0);
-        semTest = new sem_t[this->topPerNode];
-        for(int i=0; i<this->topPerNode; i++)
-            sem_init(&semTest[i], 0, 0);
-        test_addr_flag = new int[this->topPerNode];
-        for(int i=0; i<this->topPerNode; i++)
-            test_addr_flag[i]=0;
-    #endif
+
     std::srand(0);
+    pthread_mutex_init(&top_lock, NULL);
+    pthread_mutex_init(&mutex, NULL);
 }
 
 void BASimUDRuntime_t::extractSymbols(std::string progfile){
@@ -219,24 +196,20 @@ void BASimUDRuntime_t::extractSymbols(std::string progfile){
 void BASimUDRuntime_t::initMachine(std::string progfile, basim::Addr _pgbase){
   globalTick = 0;
   simTicks = 0;
-  #ifdef ASST_FASTSIM
-  total_uds = this->MachineConfig.NumStacks * this->MachineConfig.NumUDs;
-  #else
+  network_output_limit = NumTicks * this->MachineConfig.InterNodeBandwidth / 2; // 2 is because of 2GHz
+
   total_uds = this->MachineConfig.NumNodes * this->MachineConfig.NumStacks * this->MachineConfig.NumUDs;
-  #endif
+
   uds.reserve(total_uds);
 
   // Create the default private segment, i.e., the entire memory mapped region
   private_segment_t default_segment(this->MachineConfig.MapMemBase, 
     this->MachineConfig.MapMemBase + this->MachineConfig.MapMemSize, this->MachineConfig.MapMemBase, 0b11);
 
-#ifdef ASST_FASTSIM
-  for (uint32_t node = 0; node < 1; node++) 
-#else
+
   for (uint32_t node = 0; node < this->MachineConfig.NumNodes; node++) 
-#endif
   {
-    basim::UDMemoryPtr udmptr = new basim::UDMemory(node, this->MachineConfig.NumStacks, this->MachineConfig.MemLatency, this->MachineConfig.MemBandwidth, this->MachineConfig.InterNodeLatency + this->MachineConfig.FarMemExtraLatency);
+    basim::UDMemoryPtr udmptr = new basim::UDMemory(node, this->MachineConfig.NumStacks, this->MachineConfig.MemLatency, this->MachineConfig.MemBandwidth, this->MachineConfig.InterNodeLatency + this->MachineConfig.FarMemExtraLatency, this->MachineConfig.MemQueueWarningSize, this->MachineConfig.MemQueueWarningInterval);
     udMems.push_back(udmptr);
 
     for (uint32_t stack = 0; stack < this->MachineConfig.NumStacks; stack++) {
@@ -246,11 +219,7 @@ void BASimUDRuntime_t::initMachine(std::string progfile, basim::Addr _pgbase){
                           udid;
         uint32_t nwid = ((node << 11) & 0x07FFF800) | ((stack << 8) & 0x00000700) |
                   ((udid << 6) & 0x000000C0);
-        #ifdef ASST_FASTSIM
-        basim::UDAcceleratorPtr udptr = new basim::UDAccelerator(MachineConfig.NumLanes, nwid + nodeID * 2048, MachineConfig.LocalMemAddrMode, MachineConfig.InterNodeLatency);
-        #else
         basim::UDAcceleratorPtr udptr = new basim::UDAccelerator(MachineConfig.NumLanes, nwid, MachineConfig.LocalMemAddrMode, MachineConfig.InterNodeLatency);
-        #endif
         uds.push_back(udptr);
 
         basim::Addr spBase = this->MachineConfig.SPMemBase + ((node * this->MachineConfig.NumStacks + stack) * this->MachineConfig.NumUDs + udid) * this->MachineConfig.NumLanes * this->MachineConfig.SPBankSize;
@@ -258,11 +227,8 @@ void BASimUDRuntime_t::initMachine(std::string progfile, basim::Addr _pgbase){
         //uds[ud_idx]->initSetup(_pgbase, progfile, spBase);
         //basim::TranslationMemoryPtr tm = new basim::TranslationMemory(nwid, total_uds, spBase);
         extractSymbols(progfile);
-        #ifdef ASST_FASTSIM
-            uds[ud_idx]->initSetup(_pgbase, progfile, spBase, total_uds, nnodes);
-        #else
-            uds[ud_idx]->initSetup(_pgbase, progfile, spBase, total_uds);
-        #endif
+        uds[ud_idx]->initSetup(_pgbase, progfile, spBase, total_uds);
+
         // Add the translation for the default private local segment to the UpDown's translation memory
         uds[ud_idx]->insertLocalTrans(default_segment);
 
@@ -381,15 +347,6 @@ void BASimUDRuntime_t::initLogs(std::filesystem::path log_folder_path) {
 void BASimUDRuntime_t::send_event(event_t ev) {
   // Perform the regular access. This will have no effect
   UDRuntime_t::send_event(ev);
-  send_event_ev = ev;
-  send_event_valid = 1;
-
-#ifndef ASST_FASTSIM
-  send_event2(send_event_ev);
-#endif
-}
-
-void BASimUDRuntime_t::send_event2(event_t ev) {
   auto netid = ev.get_NetworkId();
   uint32_t udid = this->get_globalUDNum((netid));
 
@@ -401,34 +358,58 @@ void BASimUDRuntime_t::send_event2(event_t ev) {
   op.setData(&ev.get_OperandsData()[1]);
   basim::eventoperands_t eops(&basimev, &op);
   sendEventOperands(udid, &eops, (ev.get_NetworkId()).get_LaneId());
-  send_event_valid = 0;
 }
+
 
 int BASimUDRuntime_t::getNodeIdx(basim::networkid_t nid){
     return std::ceil(nid.getNodeID()*32.0/numUDperNode);
 }
 
 int BASimUDRuntime_t::getUDIdx(basim::networkid_t nid) {
-#ifdef ASST_FASTSIM
-  return nid.getStackID() * (this->MachineConfig.NumUDs) + nid.getUDID();
-#else
   return nid.getNodeID() *
              (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs) +
          nid.getStackID() * (this->MachineConfig.NumUDs) + nid.getUDID();
-#endif
+
 }
 
-int BASimUDRuntime_t::getUDIdxForAddr(basim::networkid_t nid, basim::Addr addr, bool isGlobal) {
-    #ifdef ASST_FASTSIM
-        return nid.getStackID() * (this->MachineConfig.NumUDs) + nid.getUDID();
-    #else
-        // This needs to be modified when node level DRAM view is available on fastsim
-        uint32_t random_number = std::rand() % this->MachineConfig.NumUDs;
-        uint32_t node_id = isGlobal ? mapPA2SA(addr, isGlobal).node_id : nid.getNodeID();
-        uint32_t stack_id = getMemoryMessageTargetStackID(addr, isGlobal);
-        return node_id * (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs) +
-          stack_id * (this->MachineConfig.NumUDs) + random_number;
-    #endif
+constexpr uint64_t POLY64REV = 0xC96C5795D7870F42ULL;
+constexpr uint64_t INITIALCRC = 0xFFFFFFFFFFFFFFFFULL;
+uint64_t crc64_tab[256];
+bool crc64_init = false;
+
+void init_crc64_tab() {
+  for (int i = 0; i < 256; i++) {
+    uint64_t part = i;
+    for (int j = 0; j < 8; j++) {
+      if (part & 1) {
+        part = (part >> 1) ^ POLY64REV;
+      } else {
+        part >>= 1;
+      }
+    }
+    crc64_tab[i] = part;
+  }
+}
+
+uint64_t crc64(uint64_t crc, const uint8_t *seq, size_t len) {
+  while (len-- > 0) {
+    crc = crc64_tab[(crc ^ *seq++) & 0xFF] ^ (crc >> 8);
+  }
+  return crc;
+}
+
+std::pair<uint32_t, uint32_t> BASimUDRuntime_t::getUDLaneForPolicy7(basim::networkid_t nid, basim::Addr addr, bool isGlobal) {
+  // helper function for send-policy-7. This is not the implementation spec. Currently using hash just for testing
+  uint32_t node_id = isGlobal ? mapPA2SA(addr, isGlobal).node_id : nid.getNodeID();
+  if (!crc64_init) {
+    init_crc64_tab();
+    crc64_init = true;
+  }
+  uint64_t crc = INITIALCRC;
+  uint64_t hash_result = crc64(crc, reinterpret_cast<const uint8_t *>(&addr), sizeof(addr)) ^ INITIALCRC;
+  uint32_t ud_idx = node_id * (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs) + (hash_result & UDMASK) >> UDPOS;
+  uint32_t lane_id = (hash_result & LANEMASK) >> LANEPOS;
+  return std::make_pair(ud_idx, lane_id);
 }
 
 // uint32_t BASimUDRuntime_t::getMemoryMessageTargetUDNodeID(uint64_t addr) {
@@ -500,6 +481,13 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                     uds[udid]->pushDelayedMessage(std::move(m));
                     break;
                 }
+                else{
+                    uint64_t target_stackid = m->getXe().getNWID().getStackID();
+                    if(target_stackid != udid / this->MachineConfig.NumUDs){
+                        uds[udid]->updateMsgTraffic(m->getXe().getNWID().getStackID(), (m->getLen() + 2) * 8);
+                        // Add 2 to account for Xe Xc size
+                    }
+                }
                 processMessageM1(std::move(m));
                 break;
             }
@@ -511,6 +499,7 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                 uint32_t target_stid;
 
                 target_udnodeid = m->getIsGlobal() ? sAddr.node_id : (udid / (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs));
+                target_stid = this->getMemoryMessageTargetStackID(pAddr, m->getIsGlobal());
                 if (target_udnodeid != (udid / (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs))) {
                     if(m->isStore()){
                       #if defined(FASTSIM_NETWORK_TRACE)
@@ -542,7 +531,17 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                     uds[udid]->pushDelayedMessage(std::move(m));
                     break;
                 }
-                target_stid = this->getMemoryMessageTargetStackID(pAddr, m->getIsGlobal());
+                else{
+                    if(target_stid != udid / this->MachineConfig.NumUDs){
+                        if(m->isStore()){
+                          uds[udid]->updateMemMsgTraffic(target_stid, (m->getLen() + 2) * WORDSIZE);
+                          // Add 2 to account for Xe Xptr size
+                        }
+                        else{
+                          uds[udid]->updateMemMsgTraffic(target_stid, 2 * WORDSIZE);
+                        }
+                    }
+                }
 
                 this->udMems[target_udnodeid]->pushMessage(std::move(m), target_stid);
                 break;
@@ -567,6 +566,13 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                     uds[udid]->pushDelayedMessage(std::move(m));
                     break;
                 }
+                else{
+                    uint64_t target_stackid = m->getXe().getNWID().getStackID();
+                    if(target_stackid != udid / this->MachineConfig.NumUDs){
+                        uds[udid]->updateMsgTraffic(m->getXe().getNWID().getStackID(), (m->getLen() + 2) * 8);
+                        // Add 2 to account for Xe Xc size
+                    }
+                }
 
                 processMessageM3(std::move(m));
                 break;
@@ -578,7 +584,8 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                 uint32_t target_udnodeid;
                 uint32_t target_stid;
 
-                target_udnodeid = m->getIsGlobal() ? DesAddr.node_id : udid / ((this->MachineConfig.NumStacks * this->MachineConfig.NumUDs));
+                target_udnodeid = m->getIsGlobal() ? DesAddr.node_id : (udid / (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs));
+                target_stid = this->getMemoryMessageTargetStackID(destaddr, m->getIsGlobal());
                 if (target_udnodeid != (udid / (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs))) {
                       #if defined(FASTSIM_NETWORK_TRACE)
                       basim::globalLogs.tracelog.write(UpDown::curRuntimeInstance->getCurTick(), "NETWORK_SEND_MSG",
@@ -596,7 +603,12 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                     uds[udid]->pushDelayedMessage(std::move(m));
                     break;
                 }
-                target_stid = this->getMemoryMessageTargetStackID(destaddr, m->getIsGlobal());
+                else{
+                    if(target_stid != udid / this->MachineConfig.NumUDs){
+                        uds[udid]->updateMemMsgTraffic(target_stid, (m->getLen() + 2) * WORDSIZE);
+                        // Add 2 to account for Xe Xptr size
+                    }
+                }
 
                 this->udMems[target_udnodeid]->pushMessage(std::move(m), target_stid);
                 break;
@@ -618,6 +630,13 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                     uds[udid]->pushDelayedMessage(std::move(m));
                     break;
                 }
+                else{
+                    uint64_t target_stackid = m->getXe().getNWID().getStackID();
+                    if(target_stackid != udid / this->MachineConfig.NumUDs){
+                        uds[udid]->updateMsgTraffic(m->getXe().getNWID().getStackID(), (m->getLen() + 2) * 8);
+                        // Add 2 to account for Xe Xc size
+                    }
+                }
 
                 processMessageM4(std::move(m));
                 break;
@@ -630,6 +649,7 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                 uint32_t target_stid;
 
                 target_udnodeid = m->getIsGlobal() ? DesAddr.node_id : (udid / (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs));
+                target_stid = this->getMemoryMessageTargetStackID(destaddr, m->getIsGlobal());
                 if (target_udnodeid != (udid / (this->MachineConfig.NumStacks * this->MachineConfig.NumUDs))) {
                       #if defined(FASTSIM_NETWORK_TRACE)
                       basim::globalLogs.tracelog.write(UpDown::curRuntimeInstance->getCurTick(), "NETWORK_SEND_MSG",
@@ -646,7 +666,12 @@ void BASimUDRuntime_t::postSimulate(uint32_t udid, uint32_t laneID) {
                     uds[udid]->pushDelayedMessage(std::move(m));
                     break;
                 }
-                target_stid = this->getMemoryMessageTargetStackID(destaddr, m->getIsGlobal());
+                else{
+                    if(target_stid != udid / this->MachineConfig.NumUDs){
+                        uds[udid]->updateMemMsgTraffic(target_stid, (m->getLen() + 2) * WORDSIZE);
+                        // Add 2 to account for Xe Xptr size
+                    }
+                }
 
                 this->udMems[target_udnodeid]->pushMessage(std::move(m), target_stid);
                 break;
@@ -663,7 +688,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
   bool popped = false;
   while(true){
       uint32_t nodeid = udid / (this->MachineConfig.NumUDs * this->MachineConfig.NumStacks);
-      if(network_output_limit > 0 && (this->simNodeStats[nodeid].output_bytes[0]->load() + 88) >= network_output_limit){  // set network bandwidth and output network traffic on node nodeid is full
+      if(network_output_limit > 0 && (this->simNodeStats[nodeid].output_bytes->load() + 88) >= network_output_limit){  // set network bandwidth and output network traffic on node nodeid is full
         return true;
       }
       std::unique_ptr<basim::MMessage> m = uds[udid]->popDelayedMessage();
@@ -686,7 +711,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
               #endif
 
               // Node to node statistics
-              this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+              this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
               #if defined(NETWORK_STATS)
               (this->simNodeStats[srcNodeID].tran_bytes_other_node[destNodeID])->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -728,7 +753,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
                 #endif
 
                 // Node to node statistics
-                this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+                this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
                 #if defined(NETWORK_STATS)
                 this->simNodeStats[srcNodeID].dram_store_bytes_other_node[target_udnodeid]->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -755,7 +780,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
                 #endif
 
                 // Node to node statistics
-                this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add(2 * WORDSIZE);
+                this->simNodeStats[srcNodeID].output_bytes->fetch_add(2 * WORDSIZE);
                 
                 #if defined(NETWORK_STATS)
                 this->simNodeStats[srcNodeID].dram_load_bytes_other_node[target_udnodeid]->fetch_add(2 * WORDSIZE);
@@ -792,7 +817,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
               
 
               // Node to node statistics
-              this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+              this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
               #if defined(NETWORK_STATS)
               this->simNodeStats[srcNodeID].tran_bytes_other_node[destNodeID]->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -834,7 +859,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
 
 
               // Node to node statistics
-              this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+              this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
                 #if defined(NETWORK_STATS)
                 this->simNodeStats[srcNodeID].dram_store_bytes_other_node[target_udnodeid]->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -867,7 +892,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
               #endif
 
               // Node to node statistics
-              this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+              this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
               #if defined(NETWORK_STATS)
               (this->simNodeStats[srcNodeID].tran_bytes_other_node[destNodeID])->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -908,7 +933,7 @@ bool BASimUDRuntime_t::popDelayedMessageUD(uint32_t udid) {
 
 
               // Node to node statistics
-              this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+              this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
                 #if defined(NETWORK_STATS)
                 this->simNodeStats[srcNodeID].dram_store_bytes_other_node[target_udnodeid]->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -974,6 +999,18 @@ bool BASimUDRuntime_t::popMemory(uint32_t udnodeid, uint32_t stackID) {
             this->udMems[udnodeid]->pushDelayedMessage(std::move(m), stackID);
             break;
           }
+          else{
+            uint64_t target_stackid = m->getXc().getNWID().getStackID();
+            if(target_stackid != stackID){
+              if(m->isStore()){
+                udMems[udnodeid]->getStackStats(stackID)->dram_outbound_msg_hist[target_stackid] += 2 * WORDSIZE;
+              }
+              else{
+                udMems[udnodeid]->getStackStats(stackID)->dram_outbound_msg_hist[target_stackid] += (m->getLen() + 2) * WORDSIZE;
+              }
+              // Add 2 to account for Xe Xptr size
+            }
+          }
           
           processMessageM2(std::move(m), udnodeid);
           break;
@@ -993,6 +1030,12 @@ bool BASimUDRuntime_t::popMemory(uint32_t udnodeid, uint32_t stackID) {
             this->udMems[udnodeid]->pushDelayedMessage(std::move(m), stackID);
             break;
           }
+          else{
+            uint64_t target_stackid = m->getXc().getNWID().getStackID();
+            if(target_stackid != stackID){
+              udMems[udnodeid]->getStackStats(stackID)->dram_outbound_msg_hist[target_stackid] += 2 * WORDSIZE;
+            }
+          }
           processMessageM3M(std::move(m));
           break;
       }
@@ -1011,6 +1054,12 @@ bool BASimUDRuntime_t::popMemory(uint32_t udnodeid, uint32_t stackID) {
             this->udMems[udnodeid]->pushDelayedMessage(std::move(m), stackID);
             break;
           }  
+          else{
+            uint64_t target_stackid = m->getXc().getNWID().getStackID();
+            if(target_stackid != stackID){
+              udMems[udnodeid]->getStackStats(stackID)->dram_outbound_msg_hist[target_stackid] += 2 * WORDSIZE;
+            }
+          }
           processMessageM4M(std::move(m));
           break;
       }
@@ -1027,7 +1076,7 @@ bool BASimUDRuntime_t::popDelayedMessageMEM(uint32_t udnodeid, uint32_t stackID)
   bool popped = false;
   uint32_t srcNodeID = udnodeid;
   while (true) {
-      if(network_output_limit > 0 && (this->simNodeStats[srcNodeID].output_bytes[0]->load() + 88) >= network_output_limit){  // set network bandwidth and output network traffic on node nodeid is full
+      if(network_output_limit > 0 && (this->simNodeStats[srcNodeID].output_bytes->load() + 88) >= network_output_limit){  // set network bandwidth and output network traffic on node nodeid is full
         return true;
       }
     std::unique_ptr<basim::MMessage> m = this->udMems[udnodeid]->popDelayedMessage(stackID);
@@ -1054,7 +1103,7 @@ bool BASimUDRuntime_t::popDelayedMessageMEM(uint32_t udnodeid, uint32_t stackID)
                 loc_stats->dram_store_ack_count_other_node++;
                 loc_stats->dram_store_ack_bytes_other_node += 2 * WORDSIZE;
 
-                this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add(2 * WORDSIZE);
+                this->simNodeStats[srcNodeID].output_bytes->fetch_add(2 * WORDSIZE);
 
                 #if defined(NETWORK_STATS)
                 this->simNodeStats[srcNodeID].dram_store_ack_bytes_other_node[target_udnodeid]->fetch_add(2 * WORDSIZE);
@@ -1084,7 +1133,7 @@ bool BASimUDRuntime_t::popDelayedMessageMEM(uint32_t udnodeid, uint32_t stackID)
                 loc_stats->dram_load_ack_count_other_node++;
                 loc_stats->dram_load_ack_bytes_other_node += (m->getLen()+2) * WORDSIZE;
 
-                this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add((m->getLen()+2) * WORDSIZE);
+                this->simNodeStats[srcNodeID].output_bytes->fetch_add((m->getLen()+2) * WORDSIZE);
 
                 #if defined(NETWORK_STATS)
                 this->simNodeStats[srcNodeID].dram_load_ack_bytes_other_node[target_udnodeid]->fetch_add((m->getLen()+2) * WORDSIZE);
@@ -1120,7 +1169,7 @@ bool BASimUDRuntime_t::popDelayedMessageMEM(uint32_t udnodeid, uint32_t stackID)
           loc_stats->dram_store_ack_count_other_node++;
           loc_stats->dram_store_ack_bytes_other_node += 2 * WORDSIZE;
 
-          this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add(2 * WORDSIZE);
+          this->simNodeStats[srcNodeID].output_bytes->fetch_add(2 * WORDSIZE);
 
           #if defined(NETWORK_STATS)
           this->simNodeStats[srcNodeID].dram_store_ack_bytes_other_node[target_udnodeid]->fetch_add((2) * WORDSIZE);
@@ -1155,7 +1204,7 @@ bool BASimUDRuntime_t::popDelayedMessageMEM(uint32_t udnodeid, uint32_t stackID)
             loc_stats->dram_store_ack_count_other_node++;
             loc_stats->dram_store_ack_bytes_other_node += 2 * WORDSIZE;
 
-            this->simNodeStats[srcNodeID].output_bytes[0]->fetch_add(2 * WORDSIZE);
+            this->simNodeStats[srcNodeID].output_bytes->fetch_add(2 * WORDSIZE);
 
             #if defined(NETWORK_STATS)
             this->simNodeStats[srcNodeID].dram_store_ack_bytes_other_node[target_udnodeid]->fetch_add(2 * WORDSIZE);
@@ -1197,9 +1246,9 @@ void BASimUDRuntime_t::processMessageM1(std::unique_ptr<basim::MMessage> m) {
       int policy = (ev.getNWID()).getSendPolicy();
       if(policy == 7) {
         basim::Addr addr = m->getdestaddr();
-        ud = getUDIdxForAddr(ev.getNWID(), addr, m->getIsGlobal());
-        int laneid = uds[ud]->getLanebyPolicy(ev.getNWID().getLaneID(), (ev.getNWID()).getSendPolicy());
-        sendEventOperands(ud, &eops, laneid);
+        std::pair<uint32_t, uint32_t> ud_lane_for_p7 = getUDLaneForPolicy7(ev.getNWID(), addr, m->getIsGlobal()); 
+        // not the implementation spec. Currently using hash just for testing
+        sendEventOperands(ud_lane_for_p7.first, &eops, ud_lane_for_p7.second);
       }else{
         int laneid = uds[ud]->getLanebyPolicy(ev.getNWID().getLaneID(), policy);
         sendEventOperands(ud, &eops, laneid);
@@ -1298,9 +1347,9 @@ void BASimUDRuntime_t::processMessageM3(std::unique_ptr<basim::MMessage> m) {
       int policy = (ev.getNWID()).getSendPolicy();
       if(policy == 7){
         basim::Addr addr = m->getdestaddr();
-        ud = getUDIdxForAddr(ev.getNWID(), addr, m->getIsGlobal());
-        int laneid = uds[ud]->getLanebyPolicy(ev.getNWID().getLaneID(), (ev.getNWID()).getSendPolicy());
-        sendEventOperands(ud, &eops, laneid);
+        std::pair<uint32_t, uint32_t> ud_lane_for_p7 = getUDLaneForPolicy7(ev.getNWID(), addr, m->getIsGlobal()); 
+        // not the implementation spec. Currently using hash just for testing
+        sendEventOperands(ud_lane_for_p7.first, &eops, ud_lane_for_p7.second);
       }else{
         int laneid = uds[ud]->getLanebyPolicy(ev.getNWID().getLaneID(), (ev.getNWID()).getSendPolicy());
         sendEventOperands(ud, &eops, laneid);
@@ -1366,9 +1415,9 @@ void BASimUDRuntime_t::processMessageM4(std::unique_ptr<basim::MMessage> m) {
       int policy = (ev.getNWID()).getSendPolicy();
       if(policy == 7){
         basim::Addr addr = m->getdestaddr();
-        ud = getUDIdxForAddr(ev.getNWID(), addr, m->getIsGlobal());
-        int laneid = uds[ud]->getLanebyPolicy(ev.getNWID().getLaneID(), (ev.getNWID()).getSendPolicy());
-        sendEventOperands(ud, &eops, laneid);
+        std::pair<uint32_t, uint32_t> ud_lane_for_p7 = getUDLaneForPolicy7(ev.getNWID(), addr, m->getIsGlobal()); 
+        // not the implementation spec. Currently using hash just for testing
+        sendEventOperands(ud_lane_for_p7.first, &eops, ud_lane_for_p7.second);
       }else{
         int laneid = uds[ud]->getLanebyPolicy(ev.getNWID().getLaneID(), (ev.getNWID()).getSendPolicy());
         sendEventOperands(ud, &eops, laneid);
@@ -1429,14 +1478,8 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
     return uds[sourceUDID]->translate_pa2va(addr, isGlobal);
 }
 
-#ifdef ASST_FASTSIM
-    void BASimUDRuntime_t::start_exec(networkid_t nwid) {
-        if(nwid.get_NodeId() == nodeID && send_event_valid){
-            send_event2(send_event_ev);
-        }
-    }
-#else
-    void BASimUDRuntime_t::start_exec(networkid_t nwid) {
+
+void BASimUDRuntime_t::start_exec(networkid_t nwid) {
         UDRuntime_t::start_exec(nwid);
 
         // Then we do a round-robin execution of all the lanes while
@@ -1451,11 +1494,8 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
                 /*------------------------ network initialization -------------------------*/
                 // reset node tmp stats for max network bandwidth
                 for(uint32_t nodeID = 0; nodeID < this->MachineConfig.NumNodes; nodeID++){
-                  this->simNodeStats[nodeID].reset_tmp(this->MachineConfig.NumNodes);
+                  this->simNodeStats[nodeID].reset_tmp();
                 }
-                network_output_limit = NumTicks * this->MachineConfig.InterNodeBandwidth / 2; // 2 is because of 2GHz
-                // printf("network_output_limit = %lu\n", network_output_limit);
-                // fflush(stdout);
                 /*------------------------ network initialization end-------------------------*/
                 
                     for (uint32_t ud = 0; ud < total_uds; ud++) {
@@ -1477,6 +1517,15 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
                     // OMP: implicit barrier
                       
                     bool something_popped = false;
+
+                    // Memory operations
+                    #pragma omp parallel for collapse(2) schedule(runtime) reduction(|| : something_exec)
+                    for (uint32_t st = 0; st < this->MachineConfig.NumStacks; st++) {
+                        for (uint32_t node = 0; node < this->MachineConfig.NumNodes; node++) {
+                            something_exec |= popMemory(node, st) | popDelayedMessageMEM(node, st);
+                        }
+                    }
+
                     #pragma omp parallel for schedule(runtime) reduction(|| : something_popped)
                     for (uint32_t ud = 0; ud < total_uds; ud++) {
                         if(something_exec) {
@@ -1489,14 +1538,6 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
                     // OMP: implicit barrier
 
                     something_exec |= something_popped;
-
-                    // Memory operations
-                    #pragma omp parallel for collapse(2) schedule(runtime) reduction(|| : something_exec)
-                    for (uint32_t st = 0; st < this->MachineConfig.NumStacks; st++) {
-                        for (uint32_t node = 0; node < this->MachineConfig.NumNodes; node++) {
-                            something_exec |= popMemory(node, st) | popDelayedMessageMEM(node, st);
-                        }
-                    }
                     // OMP: implicit barrier
 
                     for (uint32_t node = 0; node < this->MachineConfig.NumNodes; node++) {
@@ -1506,9 +1547,36 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
                     }
                     
                     num_start_exe++;
-                    // printf(" num_start_exe = %lu\n",  num_start_exe);
-                    // fflush(stdout);
+                    
                     #if defined(NETWORK_STATS)
+                    update_node_stats();
+                    #endif
+
+
+
+                #else
+                    for (uint32_t ud = 0; ud < total_uds; ud++) {
+                        for (uint32_t ln = 0; ln < this->MachineConfig.NumLanes; ln++) {
+                            if (!uds[ud]->isIdle(ln)) {
+                                something_exec = true;
+                                uds[ud]->simulate(ln, NumTicks, globalTick);
+                                postSimulateGem5(ud, ln);
+                            }
+                        }
+                    }
+                #endif
+            globalTick += NumTicks;
+            simTicks += NumTicks;
+            } while (something_exec &&
+                   (!max_sim_iterations || ++num_iterations < max_sim_iterations));
+            pthread_mutex_unlock(&mutex);
+        }
+}
+
+
+void BASimUDRuntime_t::update_node_stats(){
+  #if defined(NETWORK_STATS)
+  #pragma omp parallel for schedule(runtime)
                     for (uint32_t node = 0; node < this->MachineConfig.NumNodes; node++) {
                       for (uint32_t dstNodeID = 0; dstNodeID < this->MachineConfig.NumNodes; dstNodeID++) {
                         uint64_t node_stats_tmp = std::max(this->simNodeStats[node].max_total_count_other_node[dstNodeID]->load(), this->simNodeStats[node].max_total_count_other_node_tmp[dstNodeID]->load());
@@ -1535,11 +1603,20 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
                         this->simNodeStats[node].max_dram_store_ack_bytes_other_node[dstNodeID]->store(node_stats_tmp);
                         node_stats_tmp = std::max(this->simNodeStats[node].max_dram_load_ack_bytes_other_node[dstNodeID]->load(), this->simNodeStats[node].max_dram_load_ack_bytes_other_node_tmp[dstNodeID]->load());
                         this->simNodeStats[node].max_dram_load_ack_bytes_other_node[dstNodeID]->store(node_stats_tmp);
-
                       }
                       // printf(" finish pairwise network stats %d \n", node);
                       // fflush(stdout);
-                      uint64_t node_stats_tmp = std::max(this->simNodeStats[node].max_bytes[0]->load(), this->simNodeStats[node].output_bytes[0]->load());
+                      int bw = this->simNodeStats[node].output_bytes->load() / 1250 * 100 / NumTicks;
+                      if(bw >= 1000)
+                        bw = 999;
+                      (this->simNodeStats[node].network_bandwdith_histogram[bw])->fetch_add(1);
+
+                      int inject_rate = this->simNodeStats[node].output_counts[0]->load() / 35 * 100 / NumTicks;
+                      if(inject_rate >= 1000)
+                        inject_rate = 999;
+                      (this->simNodeStats[node].packet_rate_histogram[inject_rate])->fetch_add(1);
+
+                      uint64_t node_stats_tmp = std::max(this->simNodeStats[node].max_bytes[0]->load(), this->simNodeStats[node].output_bytes->load());
                       this->simNodeStats[node].max_bytes[0]->store(node_stats_tmp);
                       node_stats_tmp = std::max(this->simNodeStats[node].max_counts[0]->load(), this->simNodeStats[node].output_counts[0]->load());
                       this->simNodeStats[node].max_counts[0]->store(node_stats_tmp);
@@ -1554,41 +1631,39 @@ uint64_t BASimUDRuntime_t::getVirtualAddr(int sourceUDID, uint64_t addr, bool is
                       // printf(" finish cross-node network stats %d\n", node);
                       // fflush(stdout);
 
-                    }
-                    #endif
-
-                    // printf(" finish \n");
-                    //   fflush(stdout);
-
-
-                #else
-                    for (uint32_t ud = 0; ud < total_uds; ud++) {
-                        for (uint32_t ln = 0; ln < this->MachineConfig.NumLanes; ln++) {
-                            if (!uds[ud]->isIdle(ln)) {
-                                something_exec = true;
-                                uds[ud]->simulate(ln, NumTicks, globalTick);
-                                postSimulateGem5(ud, ln);
-                            }
+                      /* network timeline collection */
+                      current_cycle[node]++;
+                      current_traffic[node] = current_traffic[node] + this->simNodeStats[node].output_bytes->load();
+                      current_packet_count[node] = current_packet_count[node] + this->simNodeStats[node].output_counts[0]->load();
+                      if(current_cycle[node] == interval_cycles[node]){
+                        if(timeline_index[node] < 1000){
+                          double time = interval_cycles[node] * NumTicks / 2;
+                          (this->simNodeStats[node].traffic_timeline[timeline_index[node]])->store(current_traffic[node]/time);
+                          (this->simNodeStats[node].packet_timeline[timeline_index[node]])->store(current_packet_count[node]/time);
+                          timeline_index[node]++;
+                          current_traffic[node] = 0;
+                          current_packet_count[node] = 0;
+                          current_cycle[node] = 0;
+                        }else{
+                          interval_cycles[node] = interval_cycles[node] * 2;
+                          for(int i=0; i<500; i++){
+                            (this->simNodeStats[node].traffic_timeline[i])->store(((this->simNodeStats[node].traffic_timeline[2*i])->load() + (this->simNodeStats[node].traffic_timeline[2*i+1])->load())/2);
+                            (this->simNodeStats[node].packet_timeline[i])->store(((this->simNodeStats[node].packet_timeline[2*i])->load() + (this->simNodeStats[node].packet_timeline[2*i+1])->load())/2);
+                          }
+                          for(int i=500; i<1000; i++){
+                            (this->simNodeStats[node].traffic_timeline[i])->store(0);
+                            (this->simNodeStats[node].packet_timeline[i])->store(0);
+                          }
+                          timeline_index[node] = 500;
                         }
+                      }
+
                     }
-                #endif
-            globalTick += NumTicks;
-            simTicks += NumTicks;
-            } while (something_exec &&
-                   (!max_sim_iterations || ++num_iterations < max_sim_iterations));
-            pthread_mutex_unlock(&mutex);
-        }
-    }
-#endif
-
-
+  #endif
+}
 
 void BASimUDRuntime_t::t2ud_memcpy(void *data, uint64_t size, networkid_t nwid,
                                  uint32_t offset) {
-#ifdef ASST_FASTSIM
-  assert(nwid.get_NodeId() == nodeID && "Error, nwid is not current UpDown node");
-  nwid.nodeid = 0;
-#endif
         
   UDRuntime_t::t2ud_memcpy(data, size, nwid, offset);
   uint32_t ud_num = this->get_globalUDNum(nwid);
@@ -1605,11 +1680,6 @@ void BASimUDRuntime_t::t2ud_memcpy(void *data, uint64_t size, networkid_t nwid,
 
 void BASimUDRuntime_t::ud2t_memcpy(void *data, uint64_t size, networkid_t nwid,
                                  uint32_t offset) {
-
-#ifdef ASST_FASTSIM
-  assert(nwid.get_NodeId() == nodeID && "Error, nwid is not current UpDown node");
-  nwid.nodeid = 0;
-#endif
 
   uint32_t ud_num = this->get_globalUDNum(nwid);
   uint64_t addr = UDRuntime_t::get_lane_physical_memory(nwid, offset);
@@ -1674,37 +1744,9 @@ bool BASimUDRuntime_t::test_addr_without_exec(networkid_t nwid, uint32_t offset,
 
 void BASimUDRuntime_t::test_wait_addr(networkid_t nwid, uint32_t offset,
                                     word_t expected) {
-#ifdef ASST_FASTSIM
-    pthread_mutex_lock(&map_lock);
-    pthread_t tid = pthread_self();
-    int id1 = 0;
-    auto it1 = thread_map.find(tid);
-    if (it1 != thread_map.end()) {
-        id1 = it1->second;
-    }else{
-        id1 = thread_num.load(std::memory_order_relaxed);
-        thread_num.store(id1+1, std::memory_order_release);
-        thread_map[tid] = id1;
-    }
-    pthread_mutex_unlock(&map_lock);
-
-
-    assert(nwid.get_NodeId() == nodeID && "Error, nwid is not current UpDown node");
-    networkid_t nwid2(nwid.get_LaneId(), nwid.get_UdId(), nwid.get_StackId(), 0);
-    while(test_addr_flag[id1] != 0)
-        fflush(stdout);
-    test_nwid[id1] = nwid2;
-    test_offset[id1] = offset;
-    test_expected[id1] = expected;
-    test_addr_flag[id1] = 1;
-    sem_wait(&(semTest[id1]));
-    // The bottom call will never hold since we're holding here
-    UDRuntime_t::test_wait_addr(nwid2, offset, expected);
-#else
     while (!test_addr(nwid, offset, expected));
     // The bottom call will never hold since we're holding here
     UDRuntime_t::test_wait_addr(nwid, offset, expected);
-#endif
 }
 
 
@@ -2285,19 +2327,60 @@ void BASimUDRuntime_t::reset_curr_cycle(void){
   printf("[BASIM_GLOBAL]: Reset Curr_Sim_Cycle:%lu\n", this->simTicks);
 }
 
+void BASimUDRuntime_t::print_ud_stats(uint32_t ud_id){
+  const basim::UDStats* udstats = uds[ud_id]->getUDStats();
+  
+  printf("[UD%d] InterClusterMsgTrafficBytes (OutBound)  = [", ud_id);
+  for(int i=0; i< NUM_STACKS_CAPACITY; i++){
+    printf("%lu, ", udstats->outbound_msg_dst_cluster_hist[i]);
+  }
+  printf("]\n");
+
+  printf("[UD%d] InterClusterMemReqTrafficBytes (OutBound)  = [", ud_id);
+  for(int i=0; i< NUM_STACKS_CAPACITY; i++){
+    printf("%lu, ", udstats->outbound_mem_dst_cluster_hist[i]);
+  }
+  printf("]\n");
+}
+
+
 void BASimUDRuntime_t::print_node_stats(uint32_t nodeID) {
   printf("[BASIM_GLOBAL]: Curr_Sim_Cycle:%lu\n", this->simTicks);
-    #ifdef ASST_FASTSIM
-        uint32_t upperLimit = 1;
-    #else
-        uint32_t upperLimit = this->MachineConfig.NumNodes;
-    #endif
+
+    uint32_t upperLimit = this->MachineConfig.NumNodes;
+
 
     #if defined(NETWORK_STATS)
     printf("[Node%d] PeakTotalCrossNodeCount  = %lu\n", nodeID, this->simNodeStats[nodeID].max_counts[0]->load());
     printf("[Node%d] PeakTotalCrossNodeBytes  = %lu\n", nodeID, this->simNodeStats[nodeID].max_bytes[0]->load());
     printf("[Node%d] MaxQueueSize  = %lu\n", nodeID, this->simNodeStats[nodeID].max_queue_size[0]->load());
     printf("[Node%d] AvgQueueSize  = %.2f\n", nodeID, this->simNodeStats[nodeID].total_queue_size[0]->load()/num_start_exe);
+
+    printf("[Node%d] BWHistogram  = [", nodeID);
+    for(int i=0; i< 999; i++){
+      printf("%lu, ", this->simNodeStats[nodeID].network_bandwdith_histogram[i]->load());
+    }
+    printf("%lu]\n", this->simNodeStats[nodeID].network_bandwdith_histogram[999]->load());
+
+
+    printf("[Node%d] InjectionRateHistogram  = [", nodeID);
+    for(int i=0; i< 999; i++){
+      printf("%lu, ", this->simNodeStats[nodeID].packet_rate_histogram[i]->load());
+    }
+    printf("%lu]\n", this->simNodeStats[nodeID].packet_rate_histogram[999]->load());
+    
+    printf("[Node%d] TraffiTimelineHistogram  = [", nodeID);
+    for(int i=0; i< 999; i++){
+      printf("%lg, ", this->simNodeStats[nodeID].traffic_timeline[i]->load());
+    }
+    printf("%lg]\n", this->simNodeStats[nodeID].traffic_timeline[999]->load());
+
+    printf("[Node%d] InjectionTimelineHistogram  = [", nodeID);
+    for(int i=0; i< 999; i++){
+      printf("%lg, ", this->simNodeStats[nodeID].packet_timeline[i]->load());
+    }
+    printf("%lg]\n", this->simNodeStats[nodeID].packet_timeline[999]->load());
+
 
     for(uint32_t dstNodeID=0; dstNodeID<upperLimit; ++dstNodeID) {
         if(nodeID == dstNodeID) {
@@ -2351,23 +2434,42 @@ void BASimUDRuntime_t::print_node_stats(uint32_t nodeID) {
     printf("[Node%d-S%d] DRAMStackPeakLoadCount       =%lu\n", nodeID, stid, ststats->peak_dram_load_count);
     printf("[Node%d-S%d] DRAMStackPeakStoreCount      =%lu\n", nodeID, stid, ststats->peak_dram_store_count);
     printf("[Node%d-S%d] DRAMStackPeakLoadStoreCount  =%lu\n", nodeID, stid, ststats->peak_dram_load_store_count);
+    printf("[Node%d-S%d] DRAMStackLoadWidthHistogram  = [%lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu]\n", nodeID, stid, ststats->dram_load_word_hist[0], ststats->dram_load_word_hist[1], ststats->dram_load_word_hist[2], ststats->dram_load_word_hist[3], ststats->dram_load_word_hist[4], ststats->dram_load_word_hist[5], ststats->dram_load_word_hist[6], ststats->dram_load_word_hist[7]);
+    printf("[Node%d-S%d] DRAMStackStoreWidthHistogram  = [%lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu]\n", nodeID, stid, ststats->dram_store_word_hist[0], ststats->dram_store_word_hist[1], ststats->dram_store_word_hist[2], ststats->dram_store_word_hist[3], ststats->dram_store_word_hist[4], ststats->dram_store_word_hist[5], ststats->dram_store_word_hist[6], ststats->dram_store_word_hist[7]);
+    printf("[Node%d-S%d] InterClusterMemResponseTrafficBytes (OutBound)  = [", nodeID, stid);
+    for(int i=0; i < NUM_STACKS_CAPACITY; i++){
+      printf("%lu, ", ststats->dram_outbound_msg_hist[i]);
+    }
+    printf("]\n");
   }
 }
 
 void BASimUDRuntime_t::reset_node_stats() {
-    #ifdef ASST_FASTSIM
-        uint32_t upperLimit = 1;
-    #else
-        uint32_t upperLimit = this->MachineConfig.NumNodes;
-    #endif
+    uint32_t upperLimit = this->MachineConfig.NumNodes;
+
+
+    current_cycle.clear();
+    timeline_index.clear();
+    interval_cycles.clear();
+    current_traffic.clear();
+    current_packet_count.clear();
+
+
+    current_cycle.resize(upperLimit, 0);
+    timeline_index.resize(upperLimit, 0);
+    interval_cycles.resize(upperLimit, 1);
+    current_traffic.resize(upperLimit, 0);
+    current_packet_count.resize(upperLimit, 0);
 
     for(uint32_t nodeID = 0; nodeID < upperLimit; nodeID++){
-      this->simNodeStats[nodeID].reset(upperLimit);
+      this->simNodeStats[nodeID].reset();
       // print memory stack stats
       for(uint32_t stid = 0; stid < this->MachineConfig.NumStacks; stid++){
         basim::StackStats* ststats = udMems[nodeID]->getStackStats(stid);
         ststats->reset();
       }
+
+      
 
   }
 }
@@ -2409,7 +2511,7 @@ void BASimUDRuntime_t::db_exec(std::string sql) {
     std::string error = errMsg;
     sqlite3_exec(this->stats_db, "ROLLBACK;", 0, 0, &errMsg);
     sqlite3_free(errMsg);
-    BASIM_ERROR("SQL error: %s (error code: %d)", error.c_str(), rc);
+    BASIM_ERROR("SQL error: %s (error code: %d), SQL: %s", error.c_str(), rc, sql);
   }
   #else
     std::cerr << "ENABLE_SQLITE flag not set. Ignore exec database." << std::endl;
@@ -2852,11 +2954,7 @@ void BASimUDRuntime_t::db_write_node_stats(uint32_t start_node, uint32_t num_nod
 
   #if defined(NETWORK_STATS)
   for (uint32_t nodeID = start_node; nodeID < num_nodes; ++nodeID) {
-    #ifdef ASST_FASTSIM
-      uint32_t upperLimit = 1;
-    #else
       uint32_t upperLimit = this->MachineConfig.NumNodes;
-    #endif
 
     for(uint32_t dstNodeID=0; dstNodeID<upperLimit; ++dstNodeID) {
       if(dstNodeID == nodeID) {
@@ -2864,7 +2962,7 @@ void BASimUDRuntime_t::db_write_node_stats(uint32_t start_node, uint32_t num_nod
       }
       
       // Construct the INSERT statement for event_stats
-      sql = "INSERT INTO " + table_name + " (label_id, srcNode, dstNode, MessagesNodeCount, MessagesNodeBytes, DRAMStoreNodeCount, DRAMStoreNodeBytes, DRAMLoadNodeCount, DRAMLoadNodeBytes, DRAMStoreAckNodeCount, DRAMStoreAckNodeBytes, DRAMLoadAckNodeCount, DRAMLoadAckNodeBytes)) VALUES ("
+      sql = "INSERT INTO " + table_name + " (label_id, srcNode, dstNode, MessagesNodeCount, MessagesNodeBytes, DRAMStoreNodeCount, DRAMStoreNodeBytes, DRAMLoadNodeCount, DRAMLoadNodeBytes, DRAMStoreAckNodeCount, DRAMStoreAckNodeBytes, DRAMLoadAckNodeCount, DRAMLoadAckNodeBytes) VALUES ("
             + label_id + ", " + std::to_string(nodeID) + ", " + std::to_string(dstNodeID) + ", "
             + std::to_string(this->simNodeStats[nodeID].tran_count_other_node[dstNodeID]->load()) + ", "
             + std::to_string(this->simNodeStats[nodeID].tran_bytes_other_node[dstNodeID]->load()) + ", "
@@ -2964,32 +3062,19 @@ common_addr BASimUDRuntime_t::mapSA2PA(basim::Addr mm_addr, uint8_t isGlobal){
     final_addr.isGlobal = isGlobal;
     final_addr.addr = 0;
     final_addr.node_id = -1;
-#ifdef ASST_FASTSIM
-    // local memory
-    if(isGlobal == 0){
-        final_addr.addr = mm_addr;
-        final_addr.node_id = nodeID;
-    }
-    else if(isGlobal == 1){ // global memory
-        final_addr.node_id = nodeID;
-        basim::Addr offset = mm_addr - this->MachineConfig.PhysGMapMemBase;
-        final_addr.addr = (nodeID << 37) | offset;
-    }
-#else
     // local memory
     if(isGlobal == 0){
         final_addr.node_id = 0;
         final_addr.addr = mm_addr;
     }
     else if(isGlobal == 1){ // global memory
-        uint64_t memSize = this->MachineConfig.GMapMemSize / this->MachineConfig.NumNodes;
+        uint64_t memSize = this->MachineConfig.GMapMemSize / (global_memory_node_end - global_memory_node_start + 1);
         basim::Addr offset = mm_addr - this->MachineConfig.PhysGMapMemBase;
-        uint64_t node_id = offset / memSize;
+        uint64_t node_id = (offset / memSize) + global_memory_node_start;
         offset = offset % memSize;
         final_addr.addr = (node_id << 37) | offset;
         final_addr.node_id = node_id;
     }
-#endif
     return final_addr;
 }
 
@@ -2998,42 +3083,35 @@ common_addr BASimUDRuntime_t::mapPA2SA(basim::Addr ud_addr, uint8_t isGlobal){
     final_addr.isGlobal = isGlobal;
     final_addr.addr = 0;
     final_addr.node_id = -1;
-    #ifdef ASST_FASTSIM
-        // local memory
-        if(isGlobal == 0){
-            final_addr.node_id = nodeID;
-            final_addr.addr = ud_addr;
-        }
-        // global memory
-        else if(isGlobal == 1)
-        {
-            uint64_t node_id = (ud_addr >> 37) & 0x3FFFULL;
-            basim::Addr Offset = ud_addr & 0xF'FFFF'FFFFULL;
-            final_addr.node_id = node_id;
-            final_addr.addr = this->MachineConfig.PhysGMapMemBase + Offset;
-        }
-    #else
-        // local memory
-        if(isGlobal == 0){
-            final_addr.node_id = 0;
-            final_addr.addr = ud_addr;
-        }
-        // global memory
-        else if(isGlobal == 1)
-        {
-            uint64_t node_id = (ud_addr >> 37) & 0x3FFFULL;
-            basim::Addr offset = ud_addr & 0x1f'ffff'fffful;
-            final_addr.node_id = node_id;
+    // local memory
+    if(isGlobal == 0){
+        final_addr.node_id = 0;
+        final_addr.addr = ud_addr;
+    }
+    // global memory
+    else if(isGlobal == 1)
+    {
+        uint64_t node_id = (ud_addr >> 37) & 0x3FFFULL;
+        basim::Addr offset = ud_addr & 0x1f'ffff'fffful;
+        final_addr.node_id = node_id;
 
-            uint64_t memPerNode = this->MachineConfig.GMapMemSize / this->MachineConfig.NumNodes;
-            final_addr.addr = this->MachineConfig.PhysGMapMemBase + (memPerNode * node_id) + offset;
-            
-            // printf("mapPA2SA: udpa_addr = 0x%lx, isGlobal = %d, node_id = %ld, memPerNode = 0x%lx, offset = 0x%lx, simulator_addr = 0x%lx\n", 
-            //               ud_addr, isGlobal, node_id, memPerNode, offset, final_addr.addr);
-        }
-    #endif
+        uint64_t memPerNode = this->MachineConfig.GMapMemSize / (global_memory_node_end - global_memory_node_start + 1);
+        BASIM_ERROR_IF(offset >= memPerNode, "Out of global memory per node! Global Mem Per Node:%lu, addr offset:%lu",
+                  memPerNode, offset);
+        final_addr.addr = this->MachineConfig.PhysGMapMemBase + (memPerNode * (node_id - global_memory_node_start)) + offset;
+        
+        // printf("mapPA2SA: udpa_addr = 0x%lx, isGlobal = %d, node_id = %ld, memPerNode = 0x%lx, offset = 0x%lx, simulator_addr = 0x%lx\n", 
+        //               ud_addr, isGlobal, node_id, memPerNode, offset, final_addr.addr);
+    }
+
     return final_addr;
-} 
+}
+
+void BASimUDRuntime_t::set_global_memory_node_range(uint64_t start, uint64_t end){
+    global_memory_node_start = start;
+    global_memory_node_end = end;
+    return;
+}
 
 uint64_t BASimUDRuntime_t::get_status(){
     return status.load(std::memory_order_relaxed);
@@ -3051,25 +3129,6 @@ void BASimUDRuntime_t::set_barrier_times(uint64_t _barrier_times){
 }
 
 void BASimUDRuntime_t::barrier(uint64_t barrier_id){
-#ifdef ASST_FASTSIM
-    pthread_mutex_lock(&map_lock);
-    pthread_t tid = pthread_self();
-    int id1 = 0;
-    auto it1 = thread_map.find(tid);
-    if (it1 != thread_map.end()) {
-        id1 = it1->second;
-    }else{
-        id1 = thread_num.load(std::memory_order_relaxed);
-        thread_num.store(id1+1, std::memory_order_release);
-        thread_map[tid] = id1;
-    }
-    pthread_mutex_unlock(&map_lock);
-    while(get_status() != 0){
-        fflush(stdout);
-    }
-    set_status(10+id1);
-    sem_wait(&semSync[id1]);
-#else
    uint64_t barrier_times = get_barrier_times();
     while(get_status() != barrier_id){
         fflush(stdout);
@@ -3083,29 +3142,9 @@ void BASimUDRuntime_t::barrier(uint64_t barrier_id){
     }
     if(barrier_id > 0)
         set_status(barrier_id-1);
-#endif
 }
 
 void BASimUDRuntime_t::barrier(){
-#ifdef ASST_FASTSIM
-    pthread_mutex_lock(&map_lock);
-    pthread_t tid = pthread_self();
-    int id1 = 0;
-    auto it1 = thread_map.find(tid);
-    if (it1 != thread_map.end()) {
-        id1 = it1->second;
-    }else{
-        id1 = thread_num.load(std::memory_order_relaxed);
-        thread_num.store(id1+1, std::memory_order_release);
-        thread_map[tid] = id1;
-    }
-    pthread_mutex_unlock(&map_lock);
-    while(get_status() != 0){
-        fflush(stdout);
-    }
-    set_status(10+id1);
-    sem_wait(&semSync[id1]);
-#else
     uint64_t barrier_id = nodeID;
     uint64_t barrier_times = get_barrier_times();
     while(get_status() != barrier_id){
@@ -3120,7 +3159,6 @@ void BASimUDRuntime_t::barrier(){
     }
     if(barrier_id > 0)
         set_status(barrier_id-1);
-#endif
 }
 
 void BASimUDRuntime_t::lock(){

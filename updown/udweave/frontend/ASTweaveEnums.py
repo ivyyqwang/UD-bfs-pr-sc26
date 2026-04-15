@@ -105,7 +105,8 @@ class WeaveASTTypes(Enum):
     Scope = 20
     Break = 21
     Continue = 22
-    Unkown = 1000
+    PostIncrement = 23
+    Unknown = 1000
 
 
 class WeaveBinaryOps(Enum):
@@ -131,7 +132,7 @@ class WeaveBinaryOps(Enum):
     BWXOR = 15
     EQUAL = 16
     DIFFERENT = 17
-    MEMORY_DERREF = 18
+    MEMORY_DEREF = 18
     STRUCT_ELEMENT_ACCESS = 19
 
     def isCommutative(self) -> bool:

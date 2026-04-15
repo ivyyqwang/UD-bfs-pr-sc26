@@ -4,7 +4,6 @@ from frontend.ASTweave import *
 from Weave.debug import *
 import os
 
-
 # Grammar rules and actions
 class WeaveParser(lexer.WeaveLexer):
     def p_program(self, p):
@@ -49,6 +48,7 @@ class WeaveParser(lexer.WeaveLexer):
                 | preproc-comment
                 | break-statement
                 | continue-statement
+                | postOperator SEMICOLON
         """
         p[0] = p[1]
 
@@ -671,37 +671,6 @@ class WeaveParser(lexer.WeaveLexer):
             decl.data.setDeclType(WeaveDeclTypes.Union)
             self.astTree.set_parent(node=decl, destination=p[0])
 
-    def p_union_element_access(self, p):
-        """
-        union-element-access : expression ELEMENT_ACCESS ID
-        """
-        lhs = p[1]
-        astTreeNode = p[3]
-        # A decl name should not be named as a reserved keyword
-        self.checkIsType(
-            astTreeNode,
-            throw=True,
-            loc=FileLocation(p.lineno(1), p.lexpos(1), self._fileMgr),
-        )
-        astTreeNode = self.astTree.create_node(
-            WeaveIdentifier(
-                dataType=WeaveDataTypes(WeaveDataTypesPrimitives.String),
-                quals=[],
-                name=astTreeNode,
-                loc=FileLocation(p.lineno(3), p.lexpos(3), self._fileMgr),
-            )
-        )
-
-        node = WeaveBinaryOperator(
-            opType=WeaveBinaryOps.STRUCT_ELEMENT_ACCESS,
-            left=lhs,
-            right=astTreeNode,
-            loc=FileLocation(p.lineno(1), p.lexpos(1), self._fileMgr),
-        )
-        p[0] = self.astTree.create_node(node)
-        self.astTree.set_parent(node=lhs, destination=p[0])
-        self.astTree.set_parent(node=astTreeNode, destination=p[0])
-
     def p_type_specifier(self, p):
         """
         type-specifier : primitive-data-type
@@ -847,7 +816,7 @@ class WeaveParser(lexer.WeaveLexer):
         body = p[3]
         init = p[2][1]
         end = p[2][2]
-        incr = p[2][3]
+        incr = p[2][3] if len(p[2]) == 4 else None
 
         if not isinstance(init, list):
             init = [init]
@@ -872,16 +841,23 @@ class WeaveParser(lexer.WeaveLexer):
             self.astTree.set_parent(decl, p[0])
 
         self.astTree.set_parent(end, p[0])
-        self.astTree.set_parent(incr, p[0])
+        if incr:
+            self.astTree.set_parent(incr, p[0])
         self.astTree.set_parent(body, p[0])
 
     def p_for_range(self, p):
         """
         for-range : LPAREN declaration SEMICOLON scopedExpression SEMICOLON assign-expression RPAREN
+                  | LPAREN declaration SEMICOLON scopedExpression SEMICOLON RPAREN
+                  | LPAREN declaration SEMICOLON scopedExpression SEMICOLON postOperator RPAREN
                   | LPAREN assign-expression SEMICOLON scopedExpression SEMICOLON assign-expression RPAREN
-
+                  | LPAREN assign-expression SEMICOLON scopedExpression SEMICOLON RPAREN
+                  | LPAREN assign-expression SEMICOLON scopedExpression SEMICOLON postOperator RPAREN
         """
-        p[0] = ("for-range", p[2], p[4], p[6])
+        if len(p) == 7:
+            p[0] = ("for-range", p[2], p[4])
+        else:
+            p[0] = ("for-range", p[2], p[4], p[6])
 
     def p_while(self, p):
         """
@@ -1023,7 +999,9 @@ class WeaveParser(lexer.WeaveLexer):
     def p_expression_array(self, p):
         """
         expression-array : ID LSBRACKET expression RSBRACKET
+                         | ID LSBRACKET postOperator RSBRACKET
         """
+
         # Array expression from a keyword is invalid
         self.checkIsType(
             p[1],
@@ -1038,8 +1016,9 @@ class WeaveParser(lexer.WeaveLexer):
         )
 
         astTreeNode = self.astTree.create_node(node_id)
+
         node = WeaveBinaryOperator(
-            opType=WeaveBinaryOps.MEMORY_DERREF,
+            opType=WeaveBinaryOps.MEMORY_DEREF,
             left=astTreeNode,
             right=p[3],
             loc=FileLocation(p.lineno(1), p.lexpos(1), self._fileMgr),
@@ -1092,10 +1071,6 @@ class WeaveParser(lexer.WeaveLexer):
             "==": WeaveBinaryOps.EQUAL,
             "!=": WeaveBinaryOps.DIFFERENT,
         }
-
-        # TODO: Add constant expression elimination. If both
-        # sides of the equation are numbers, we resolve the
-        # equation and return an immediate node instead
 
         node = WeaveBinaryOperator(
             opType=ops_dict[p[2]],
@@ -1207,6 +1182,17 @@ class WeaveParser(lexer.WeaveLexer):
                 node.setIsReserved(True)
 
             p[0] = self.astTree.create_node(node)
+
+    # Operators such as `i++`, `i--`
+    def p_postOperator(self, p):
+        """
+        postOperator : factor-identifier PLUSPLUS
+                     | factor-identifier MINUSMINUS
+        """
+        instType =  WIRinst.WeaveIRarithTypes.IADDITION if p[2] == '++' else WIRinst.WeaveIRarithTypes.ISUBTRACTION
+        node = WeavePostOperator(val=p[1].data, instType=instType, loc=FileLocation(p.lineno(1), p.lexpos(1), self._fileMgr))
+        p[0] = self.astTree.create_node(node)
+        self.astTree.set_parent(p[1], p[0])
 
     def p_strings_concat(self, p):
         """
@@ -1389,7 +1375,7 @@ class WeaveParser(lexer.WeaveLexer):
 
     # Build the parser
     def build(self, **kwargs):
-        self.parser = yacc.yacc(module=self, **kwargs)
+        self.parser = yacc.yacc(module=self, write_tables=False, **kwargs)
 
     def parse(self, inStr: str, **kwargs):
         fileName = ""

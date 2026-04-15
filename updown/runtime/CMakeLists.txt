@@ -15,7 +15,7 @@ include(CMakePrintHelpers)
   else ()
     add_library(UpDownRuntime SHARED src/updown.cpp)
     add_library(UpDownRuntimeStatic STATIC src/updown.cpp)
-  set_target_properties(UpDownRuntime PROPERTIES PUBLIC_HEADER 
+  set_target_properties(UpDownRuntime PROPERTIES PUBLIC_HEADER
       "include/ud_machine.h;include/operands.h;include/networkid.h;include/event.h;include/updown.h;include/updown_config.h")
   set_target_properties(UpDownRuntimeStatic PROPERTIES PUBLIC_HEADER 
       "include/ud_machine.h;include/operands.h;include/networkid.h;include/event.h;include/updown.h;include/updown_config.h")

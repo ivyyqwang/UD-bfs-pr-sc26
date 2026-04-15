@@ -125,7 +125,7 @@ def set_ev_label(tran, ev_word, new_label, src_ev="X2", new_thread=False, label 
     tran.writeAction(f"evlb {ev_word} {new_label}")
     return tran
 
-def broadcast(tran, ev_word, num_dst, ret_label, log2_stride, data, scratch, mode='r', send_temp_reg_flag=True):
+def broadcast(tran, ev_word, num_dst, ret_label, log2_stride, data, scratch, mode='r', send_temp_reg_flag=True, flag=''):
         counter     = scratch[1]
         dst_nwid    = scratch[0]
 
@@ -137,10 +137,10 @@ def broadcast(tran, ev_word, num_dst, ret_label, log2_stride, data, scratch, mod
 
         tran.writeAction(f"mov_imm2reg {counter} 0")
         if log2_stride > 0:
-            tran.writeAction(f"broadcast_loop: lshift {counter} {dst_nwid} {log2_stride}")
+            tran.writeAction(f"broadcast_loop{flag}: lshift {counter} {dst_nwid} {log2_stride}")
             tran.writeAction(f"add {'X0'} {dst_nwid} {dst_nwid}")
         else:
-            tran.writeAction(f"broadcast_loop: add {'X0'} {counter} {dst_nwid}")
+            tran.writeAction(f"broadcast_loop{flag}: add {'X0'} {counter} {dst_nwid}")
         tran = set_nwid(tran, ev_word, dst_nwid, src_ev=ev_word)
         if ret_label[0] == 'X' or ret_label[0:2] == 'OB' or ret_label[0:4] == 'UDPR':
             tran.writeAction(f"send{mode}{'_wcont'} {ev_word} {ret_label} {data}")
@@ -148,9 +148,9 @@ def broadcast(tran, ev_word, num_dst, ret_label, log2_stride, data, scratch, mod
             tran.writeAction(format_pseudo(f"send{mode}_wret {ev_word} {ret_label} {data}", dst_nwid, send_temp_reg_flag))
         tran.writeAction(f"addi {counter} {counter} 1")
         if isinstance(num_dst, int) or num_dst.isdigit():
-            tran.writeAction(f"blti {counter} {num_dst} broadcast_loop")
+            tran.writeAction(f"blti {counter} {num_dst} broadcast_loop{flag}")
         else:
-            tran.writeAction(f"blt {counter} {num_dst} broadcast_loop")
+            tran.writeAction(f"blt {counter} {num_dst} broadcast_loop{flag}")
 
         return tran
 

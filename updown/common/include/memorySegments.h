@@ -549,6 +549,10 @@ public:
                 virtual_limit, virtual_limit, swizzle_mask.getMask(), swizzle_mask.getMask(), num_nodes, block_size, physical_base.getNodePhysicalAddress(), physical_base.getNodePhysicalAddress(), physical_limit.getCompressed(), physical_limit.getCompressed(), access_flags);
   }
 
+  uint64_t getVirtualBase() {
+    return virtual_base;
+  }
+
 };
 
 /**
@@ -645,5 +649,9 @@ public:
     UPDOWN_INFOMSG("Private local segment {virtual base = %ld(0x%lx), virtual limit = %ld(0x%lx), offset = %ld(0x%lx), access permission = %d}", 
                 virtual_base,  virtual_base, 
                 virtual_limit, virtual_limit, offset, offset, access_flags);
+  }
+
+  uint64_t getVirtualBase() {
+    return virtual_base;
   }
 };

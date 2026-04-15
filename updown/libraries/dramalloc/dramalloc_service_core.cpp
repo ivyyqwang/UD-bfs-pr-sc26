@@ -1,3 +1,4 @@
+#include "../../common/include/memorySegments.h"
 #include "compatibility.h"
 #include "dramalloc.hpp"
 #include "networkid.h"
@@ -13,6 +14,8 @@
 
 #define IGNORE_CONTINUATION 0x7FFFFFFFFFFFFFFF
 #define ROUND_UP_ALLOCATION
+#define ALLOCATION_FLAG 0
+#define FREE_FLAG 1
 
 namespace dramalloc {
 
@@ -148,8 +151,8 @@ OPTNONE void DramAllocator::run() {
       resetArgs();
     } else if (args->reqType == DRAMallocRequestType::FREE_MEMORY) {
       /* TODO: missing free */
+      free_memory((void *)(args->allocArgs.size), args->continuation);
       resetArgs();
-      writeFreeResponse();
     }
     UpDown::networkid_t nwid(0, false, 0);
     runtime->start_exec(nwid);
@@ -205,6 +208,48 @@ void *DramAllocator::allocate_memory(size_t size, size_t blockSize, uint64_t num
   return virt;
 }
 
+bool DramAllocator::free_memory(void *ptr, UpDown::word_t continuation) {
+
+  if (((uint64_t)ptr) > this->runtime->getMachineConfig().MapMemBase &&
+      ((uint64_t)ptr) < this->runtime->getMachineConfig().MapMemBase + this->runtime->getMachineConfig().MapMemSize) {
+    printf("DramAllocator: free memory in local memory: VA base = %p\n", ptr);
+    runtime->mm_free(ptr);
+    return true;
+  }
+
+  if (((uint64_t)ptr) < this->runtime->getMachineConfig().GMapMemBase &&
+      ((uint64_t)ptr) > this->runtime->getMachineConfig().GMapMemBase + this->runtime->getMachineConfig().GMapMemSize) {
+    return false;
+  }
+
+  BASIM_INFOMSG("DramAllocator: free memory in global memory: VA base = %p\n", ptr);
+  runtime->mm_free_global(ptr);
+
+  // find the translation entry
+  auto it = std::find_if(this->translation_table.begin(), this->translation_table.end(),
+                         [ptr](const GTranslateEntry &entry) { return entry.virt_base == reinterpret_cast<uint64_t>(ptr); });
+  BASIM_ERROR_IF(it == this->translation_table.end(), "DramAllocator: free memory error: cannot find translation entry for VA base = %p\n", ptr);
+  BASIM_INFOMSG("DramAllocator: found translation entry for VA base = %p: phy_base= 0x%lx, size=%ld, blockSize=%ld, numNodes=%ld, startNode=%ld\n", ptr, it->phy_base, it->size,
+         it->blockSize, it->numNodes, it->startNode);
+
+  uint64_t phy_base = it->phy_base;
+  size_t size = it->size;
+  size_t blockSize = it->blockSize;
+  uint64_t numNodes = it->numNodes;
+  uint64_t startNode = it->startNode;
+
+  // remove the mapping for this allocation
+  removeTranslationEntries(ptr, phy_base, size, blockSize, numNodes, startNode, continuation);
+
+  // free the physical allocation
+  allocator->free(phy_base, size, blockSize, numNodes, startNode);
+
+  // remove the translation entry
+  translation_table.erase(it);
+
+  return true;
+}
+
 DRAMRequest *DramAllocator::getArgAddr() { return this->args; }
 
 void DramAllocator::printMemoryState() { this->allocator->printStats(); }
@@ -233,8 +278,8 @@ void DramAllocator::installTranslationEntries(void *virt, uint64_t phy, size_t s
 
     runtime->lock();
 
-    UpDown::word_t opsData[7];
-    UpDown::operands_t ops(7, opsData);
+    UpDown::word_t opsData[8];
+    UpDown::operands_t ops(8, opsData);
     ops.set_operand(0, reinterpret_cast<UpDown::word_t>(virt));
     ops.set_operand(1, size);
     ops.set_operand(2, mask);
@@ -242,6 +287,7 @@ void DramAllocator::installTranslationEntries(void *virt, uint64_t phy, size_t s
     ops.set_operand(4, this->runtime->getMachineConfig().NumNodes);
     ops.set_operand(5, 1 ? phy != UINT64_MAX : 0);
     ops.set_operand(6, continuation);
+    ops.set_operand(7, ALLOCATION_FLAG);
     // Install translation to the nodes that can access this memory
     uint64_t nwid = 0;
     UpDown::event_t eventOps(eventLabel, nwid, UpDown::CREATE_THREAD, &ops);
@@ -253,7 +299,7 @@ void DramAllocator::installTranslationEntries(void *virt, uint64_t phy, size_t s
 
     runtime->send_event(eventOps);
     BASIM_INFOMSG("DramAllocator: send translation for va_base=%p pa_base=0x%lx to nwid [%ld,%ld)\n", virt, phy, 0l,
-           this->runtime->getMachineConfig().NumNodes * 64 * 32);
+                  this->runtime->getMachineConfig().NumNodes * 64 * 32);
     runtime->start_exec(nwid);
     runtime->unlock();
 
@@ -262,7 +308,55 @@ void DramAllocator::installTranslationEntries(void *virt, uint64_t phy, size_t s
   }
 }
 
-void DramAllocator::writeFreeResponse() {}
+void DramAllocator::removeTranslationEntries(void *virt, uint64_t phy, size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode,
+                                             UpDown::word_t continuation) {
+  BASIM_INFOMSG("DramAllocator: remove translation entries\n");
+  BASIM_INFOMSG("args->allocArgs.virt: %p\n", virt);
+  BASIM_INFOMSG("args->allocArgs.phy: 0x%lx\n", phy);
+  BASIM_INFOMSG("args->allocArgs.size: %ld\n", size);
+  BASIM_INFOMSG("args->allocArgs.blockSize: %ld\n", blockSize);
+  BASIM_INFOMSG("args->allocArgs.nrNodes: %ld\n", numNodes);
+  BASIM_INFOMSG("args->allocArgs.startNode: %ld\n", startNode);
+
+  // Calculate the swizzle mask for the translation
+  uint64_t isGlobal;
+  if (numNodes == 1) {
+    printf("DramAllocator: Free single node allocation in local memory, virtual address = physical address = 0x%lX\n", (uint64_t)virt);
+    isGlobal = 0;
+  } else {
+    isGlobal = 1;
+  }
+
+  runtime->lock();
+
+  UpDown::word_t opsData[8];
+  UpDown::operands_t ops(8, opsData);
+  ops.set_operand(0, reinterpret_cast<UpDown::word_t>(virt));
+  ops.set_operand(1, size);
+  ops.set_operand(2, isGlobal);
+  ops.set_operand(3, phy);
+  ops.set_operand(4, this->runtime->getMachineConfig().NumNodes);
+  ops.set_operand(5, 1);
+  ops.set_operand(6, continuation);
+  ops.set_operand(7, FREE_FLAG);
+  // Install translation to the nodes that can access this memory
+  uint64_t nwid = 0;
+  UpDown::event_t eventOps(eventLabel, nwid, UpDown::CREATE_THREAD, &ops);
+
+  // Init top flag to 0
+  uint64_t val = 0;
+  if (continuation == IGNORE_CONTINUATION)
+    runtime->t2ud_memcpy(&val, sizeof(uint64_t), nwid, 0 /*Offset*/);
+
+  runtime->send_event(eventOps);
+  BASIM_INFOMSG("DramAllocator: send free translation for va_base=%p pa_base=0x%lx to nwid [%ld,%ld)\n", virt, phy, 0l,
+                this->runtime->getMachineConfig().NumNodes * 64 * 32);
+  runtime->start_exec(nwid);
+  runtime->unlock();
+
+  if (continuation == IGNORE_CONTINUATION)
+    runtime->test_wait_addr(nwid, 0, -1);
+}
 
 void DramAllocator::resetArgs() {
   this->args->freeArgs.address = 0;
@@ -277,6 +371,11 @@ void DramAllocator::resetArgs() {
 
 void *DramAllocator::mm_malloc_global(size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode) {
   return this->allocate_memory(size, blockSize, numNodes, startNode, IGNORE_CONTINUATION);
+}
+
+bool DramAllocator::mm_free_global(void *ptr) {
+  BASIM_INFOMSG("DramAllocator: free memory at VA base = %p\n", ptr);
+  return this->free_memory(ptr, IGNORE_CONTINUATION);
 }
 
 uint64_t DramAllocator::get_swizzle_mask(size_t blockSize, uint64_t nrNodes) {
@@ -319,27 +418,100 @@ void *DramAllocator::translate_udva2sa(uint64_t virt) {
       BASIM_INFOMSG("Block number %lu, node offset %lu, block number in node %lu, block offset %lu", blockNumber, nodeOffset, blockNumberInNode, blockOffset);
 
       // Calculate the simulated address
-      uint64_t simulatedAddress = this->runtime->getMachineConfig().PhysGMapMemBase + this->memPerNode * (nodeOffset + entry.startNode) +
-                                  blockNumberInNode * entry.blockSize + blockOffset + ((entry.phy_base << 27) >> 27);
+      // uint64_t simulatedAddress = this->runtime->getMachineConfig().PhysGMapMemBase + this->memPerNode * (nodeOffset + entry.startNode) +
+      //                             blockNumberInNode * entry.blockSize + blockOffset + ((entry.phy_base << 27) >> 27);
 
-      BASIM_INFOMSG("Simulated address 0x%lX, memory per node 0x%lX, physGMapMemBase 0x%lX\n", simulatedAddress, memPerNode,
-                    this->runtime->getMachineConfig().PhysGMapMemBase);
+      // BASIM_INFOMSG("Simulated address 0x%lX, memory per node 0x%lX, physGMapMemBase 0x%lX\n", simulatedAddress, memPerNode,
+      //               this->runtime->getMachineConfig().PhysGMapMemBase);
 
-// #define DEBUG_TRANSLATION
-#ifdef DEBUG_TRANSLATION
       uint64_t swizzledAddress = (offset & ~(~0ULL >> P)) | nodeOffset << 37 | blockNumberInNode * entry.blockSize + blockOffset;
-      BASIM_INFOMSG("Swizzled address 0x%lX", swizzledAddress);
-      uint64_t physicalAddress = ((uint64_t)entry.phy_base) + swizzledAddress;
-      BASIM_INFOMSG("Physical address 0x%lX, entry.phy_base 0x%lX, physGMapMemBase 0x%lX", physicalAddress, entry.phy_base,
-                    this->runtime->getMachineConfig().PhysGMapMemBase);
+      uint64_t physicalAddress = (physical_addr_t(entry.phy_base) + physical_addr_t(swizzledAddress)).getCompressed();
       uint64_t pa2sa = ((UpDown::BASimUDRuntime_t *)(this->runtime))->mapPA2SA((basim::Addr)physicalAddress, 1).addr;
-      physicalAddress += this->runtime->getMachineConfig().PhysGMapMemBase;
-      BASIM_INFOMSG("Calculated simulated address 0x%lX pa2sa return address 0x%lx", physicalAddress, pa2sa);
-      BASIM_ERROR_IF(simulatedAddress != physicalAddress, "Translation error! Translation mismatch directly calculated = 0x%lx, from swizzled address = 0x%lx",
-                     simulatedAddress, physicalAddress);
-#endif
+      return (void *)(pa2sa);
 
-      return (void *)(simulatedAddress);
+      // // #define DEBUG_TRANSLATION
+      // #ifdef DEBUG_TRANSLATION
+      //       uint64_t swizzledAddress = (offset & ~(~0ULL >> P)) | nodeOffset << 37 | blockNumberInNode * entry.blockSize + blockOffset;
+      //       BASIM_INFOMSG("Swizzled address 0x%lX", swizzledAddress);
+      //       uint64_t physicalAddress = ((uint64_t)entry.phy_base) + swizzledAddress;
+      //       BASIM_INFOMSG("Physical address 0x%lX, entry.phy_base 0x%lX, physGMapMemBase 0x%lX", physicalAddress, entry.phy_base,
+      //                     this->runtime->getMachineConfig().PhysGMapMemBase);
+      //       uint64_t pa2sa = ((UpDown::BASimUDRuntime_t *)(this->runtime))->mapPA2SA((basim::Addr)physicalAddress, 1).addr;
+      //       physicalAddress += this->runtime->getMachineConfig().PhysGMapMemBase;
+      //       BASIM_INFOMSG("Calculated simulated address 0x%lX pa2sa return address 0x%lx", physicalAddress, pa2sa);
+      //       BASIM_ERROR_IF(simulatedAddress != physicalAddress, "Translation error! Translation mismatch directly calculated = 0x%lx, from swizzled address =
+      //       0x%lx",
+      //                      simulatedAddress, physicalAddress);
+      // #endif
+
+      //       return (void *)(simulatedAddress);
+    }
+  }
+
+  BASIM_ERROR("Translation error! Virtual address 0x%lX not exist in translation table\n", (uint64_t)virt);
+  // Translation failed
+  return nullptr;
+}
+
+void *DramAllocator::translate_udva2pa(uint64_t virt) {
+  BASIM_INFOMSG("Getting physical address for virtual address 0x%lX", (uint64_t)virt);
+  for (auto &entry : this->translation_table) {
+    if (entry.virt_base <= virt && virt < entry.virt_base + entry.size) {
+      BASIM_INFOMSG("Translation entry found: virt_base = 0x%lX, phy_base = 0x%lX, size = %lu, blockSize = %lu, numNodes = %lu, startNode = %lu",
+                    entry.virt_base, entry.phy_base, entry.size, entry.blockSize, entry.numNodes, entry.startNode);
+
+      // Check for single node allocation
+      if (entry.numNodes == 1) {
+        BASIM_INFOMSG("Single node allocation in local memory, virtual address = physical address = 0x%lX", (uint64_t)virt);
+        return (void *)(virt);
+      }
+
+      // Check for bounds
+      UpDown::word_t offset = virt - entry.virt_base;
+
+      // Convert the swizzle mask to the parameters
+      uint64_t C = log2(entry.blockSize);
+      uint64_t B = log2(entry.numNodes);
+      uint64_t F = 37 - C;
+      uint64_t P = 64 - C - B - F;
+
+      BASIM_INFOMSG("Swizzle parameters P = %lu, F = %lu, B = %lu, C = %lu", P, F, B, C);
+
+      // Calculate the physical address
+      uint64_t blockNumber = (offset >> C) & ((1ULL << (B + F)) - 1);
+      uint64_t nodeOffset = blockNumber % entry.numNodes;
+      uint64_t blockNumberInNode = blockNumber / entry.numNodes;
+      uint64_t blockOffset = offset & ((1ULL << C) - 1);
+      BASIM_INFOMSG("Block number %lu, node offset %lu, block number in node %lu, block offset %lu", blockNumber, nodeOffset, blockNumberInNode, blockOffset);
+
+      // Calculate the simulated address
+      // uint64_t simulatedAddress = this->runtime->getMachineConfig().PhysGMapMemBase + this->memPerNode * (nodeOffset + entry.startNode) +
+      //                             blockNumberInNode * entry.blockSize + blockOffset + ((entry.phy_base << 27) >> 27);
+
+      // BASIM_INFOMSG("Simulated address 0x%lX, memory per node 0x%lX, physGMapMemBase 0x%lX\n", simulatedAddress, memPerNode,
+      //               this->runtime->getMachineConfig().PhysGMapMemBase);
+
+      uint64_t swizzledAddress = (offset & ~(~0ULL >> P)) | nodeOffset << 37 | blockNumberInNode * entry.blockSize + blockOffset;
+      uint64_t physicalAddress = (physical_addr_t(entry.phy_base) + physical_addr_t(swizzledAddress)).getCompressed();
+      // uint64_t pa2sa = ((UpDown::BASimUDRuntime_t *)(this->runtime))->mapPA2SA((basim::Addr)physicalAddress, 1).addr;
+      return (void *)(physicalAddress);
+
+      // // #define DEBUG_TRANSLATION
+      // #ifdef DEBUG_TRANSLATION
+      //       uint64_t swizzledAddress = (offset & ~(~0ULL >> P)) | nodeOffset << 37 | blockNumberInNode * entry.blockSize + blockOffset;
+      //       BASIM_INFOMSG("Swizzled address 0x%lX", swizzledAddress);
+      //       uint64_t physicalAddress = ((uint64_t)entry.phy_base) + swizzledAddress;
+      //       BASIM_INFOMSG("Physical address 0x%lX, entry.phy_base 0x%lX, physGMapMemBase 0x%lX", physicalAddress, entry.phy_base,
+      //                     this->runtime->getMachineConfig().PhysGMapMemBase);
+      //       uint64_t pa2sa = ((UpDown::BASimUDRuntime_t *)(this->runtime))->mapPA2SA((basim::Addr)physicalAddress, 1).addr;
+      //       physicalAddress += this->runtime->getMachineConfig().PhysGMapMemBase;
+      //       BASIM_INFOMSG("Calculated simulated address 0x%lX pa2sa return address 0x%lx", physicalAddress, pa2sa);
+      //       BASIM_ERROR_IF(simulatedAddress != physicalAddress, "Translation error! Translation mismatch directly calculated = 0x%lx, from swizzled address =
+      //       0x%lx",
+      //                      simulatedAddress, physicalAddress);
+      // #endif
+
+      //       return (void *)(simulatedAddress);
     }
   }
 

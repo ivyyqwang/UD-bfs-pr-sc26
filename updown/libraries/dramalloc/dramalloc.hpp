@@ -48,6 +48,7 @@ struct AllocationRequestArgs {
 
 struct FreeRequestArgs {
   UpDown::word_t address = 0;
+  uint64_t padding[3];
 };
 
 struct DRAMRequest {
@@ -131,12 +132,21 @@ public:
   void *mm_malloc_global(size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode);
 
   /**
+   * \brief Frees the allocated memory in global virtual memory.
+   *
+   * \param ptr A pointer to the allocated memory to be freed.
+   * \return True if the memory is successfully freed, false otherwise.
+   */
+  bool mm_free_global(void *ptr);
+
+  /**
    * \brief Translates a virtual address to a physical address.
    *
    * \param virt The virtual address.
    * \return The physical address. Null if the translation fails.
    */
   void *translate_udva2sa(uint64_t virt);
+  void *translate_udva2pa(uint64_t virt);
 
 private:
   struct GTranslateEntry {
@@ -163,11 +173,12 @@ private:
 #endif
 
   DRAMRequest *getArgAddr();
-  void *allocate_memory(size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode, UpDown::word_t nwid);
+  void *allocate_memory(size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode, UpDown::word_t continuation);
+  bool free_memory(void *ptr, UpDown::word_t continuation);
   void installTranslationEntries(void *virt, uint64_t phy, size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode,
                                  UpDown::word_t continuation);
-  void writeAllocationResponse(UpDown::word_t *addr);
-  void writeFreeResponse();
+  void removeTranslationEntries(void *virt, uint64_t phy, size_t size, size_t blockSize, uint64_t numNodes, uint64_t startNode,
+                                UpDown::word_t continuation);
   void resetArgs();
   uint64_t get_swizzle_mask(size_t blockSize, uint64_t nrNodes);
 };

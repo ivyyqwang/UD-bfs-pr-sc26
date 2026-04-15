@@ -1,6 +1,6 @@
 from linker.EFAProgram import efaProgram, EFAProgram
 
-from libraries.UDMapShuffleReduce.linkable.LinkableKeyValueSetTPL import KeyValueSetInterface
+from LinkableKeyValueSetTPL import KeyValueSetInterface
 
 class IntermediateKeyValueSet(KeyValueSetInterface):
     '''

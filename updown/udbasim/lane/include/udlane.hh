@@ -286,6 +286,8 @@ namespace basim
 
         UDMem(uint64_t latency, uint64_t bandwidth, uint64_t inter_node_latency);
 
+        uint64_t getTime(){ return curTimeStamp; }
+        uint64_t getQueueSize() { return _message_time_stamp.size(); }
 
         void tick(uint64_t timestamp = 0) override;
 

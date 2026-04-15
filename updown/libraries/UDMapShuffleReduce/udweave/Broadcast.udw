@@ -1,0 +1,761 @@
+#include "MachineConfig.udwh"
+#include "LMStaticMap.udwh"
+#include "MachineConfig.udwh"
+
+#define DEBUG_FLAG 0
+#define DEBUG_DETAIL_FLAG 0
+
+#define MAX_NUM_BCST_VALUES 4
+#define MAX_NUM_SYNC_VALUES 3
+#define DEFAULT_FANOUT 32
+
+#define NUM_SYNC_LOOP_ITERS 10
+
+thread KnaryBroadcastNode {
+    unsigned long num_children;
+    unsigned long nwid_stride;
+    unsigned long ndid_stride;
+    unsigned long cont;
+
+    unsigned long val1;
+    unsigned long val2;
+    unsigned long val3;
+    unsigned long val4;
+
+    /*
+    This event is triggered to initialize the global state for the broadcast operation.
+    It calculates the number of lanes and the fanout factor (k) from the input parameters.
+    Then, it sends out broadcast events to the specified destination event with the given values.
+    */
+    event global_init(unsigned long num_nodes_op, unsigned long dst_evw, long values) {
+        unsigned long num_nodes = (num_nodes_op << 32) >> 32;
+        unsigned long k = num_nodes_op >> 32;
+
+        if (k == 0) {
+            // If k is zero, set it to 32 (default fanout value)
+            k = DEFAULT_FANOUT;
+        }
+        if (DEBUG_FLAG) {
+            unsigned long num_lanes = num_nodes * LANE_PER_UD * UD_PER_NODE;
+            print("Global init called with num_nodes=%lu, num_lanes=%lu, k=%lu, dst_evw=%lu(0x%lx), values=0x%lx", num_nodes, num_lanes, k, dst_evw, dst_evw, values);
+        }
+
+        // Copy the operands to the send buffer in local memory
+        long* local tmp_lm_ptr = LMBASE + SEND_BUFFER_OFFSET;
+        
+        long num_ops = ((CEVNT >> 20) & 7) + 2;
+        asm {
+            "bcpyol X8 %[tmp_lm_ptr] %[num_ops]"
+        }: [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_ops] "r" (num_ops);
+
+        ndid_stride = num_nodes / k;
+        if (ndid_stride == 0 || (num_nodes < k)) {
+            // If the number of nodes is less than fan out parameter k, set ndid_stride to 1
+            // so that each node sends to one child node at leavels of the tree
+            ndid_stride = 1;
+        }
+        nwid_stride = ndid_stride * LANE_PER_UD * UD_PER_NODE;
+        tmp_lm_ptr[0] = k << 32 | ndid_stride;
+        num_children = 0;
+        if (DEBUG_FLAG) {
+            print("Calculated ndid_stride=%lu, nwid_stride=%lu", ndid_stride, nwid_stride);
+        }
+
+        long evw = evw_new(NETID, broadcast_nodes);
+        unsigned long bcst_nwid = NETID;
+        cont = evw_update_event(CEVNT, global_sync);
+        for (unsigned long i = 0; i < num_nodes; i = i + ndid_stride) {
+            if (DEBUG_FLAG) {
+                print("Sending node broadcast to ndid=%lu, nwid=%lu(0x%lx)", i, bcst_nwid, bcst_nwid);
+            }
+            if (i + ndid_stride >= num_nodes) {
+                // Last child, adjust the ndid_stride to cover all remaining nodes
+                long tmp_val = (k << 32);
+                tmp_val = tmp_val + num_nodes;
+                tmp_val = tmp_val - i;
+                tmp_lm_ptr[0] = tmp_val;
+                if (DEBUG_FLAG) {
+                    print("Adjusting last child ndid_stride to %lu", (num_nodes - i));
+                }
+            }
+            evw = evw_update_netid(evw, bcst_nwid);
+            if (num_ops == 3) {
+                if (DEBUG_FLAG) {
+                    print("Sending event %lu to destination nwid=%lu(0x%lx) with 3 operands", evw, bcst_nwid, bcst_nwid);
+                }
+
+                send_event(evw, tmp_lm_ptr, 3, cont);
+            } elif (num_ops == 4) {
+                if (DEBUG_FLAG) {
+                    print("Sending event %lu to destination nwid=%lu(0x%lx) with 4 operands", evw, bcst_nwid, bcst_nwid);
+                }
+                send_event(evw, tmp_lm_ptr, 4, cont);
+            } elif (num_ops == 5) {
+                if (DEBUG_FLAG) {
+                    print("Sending event %lu to destination nwid=%lu(0x%lx) with %lu operands", evw, bcst_nwid, bcst_nwid, num_ops);
+                }
+                send_event(evw, tmp_lm_ptr, LANE_MSG_SIZE, cont);
+            } elif (num_ops == 6) {
+                if (DEBUG_FLAG) {
+                    print("Sending event %lu to destination nwid=%lu(0x%lx) with %lu operands", evw, bcst_nwid, bcst_nwid, num_ops);
+                }
+                send_event(evw, tmp_lm_ptr, LANE_MSG_SIZE, cont);
+            } else {
+                if (DEBUG_FLAG) {
+                    print("Sending event %lu to destination nwid=%lu(0x%lx) with %lu operands", evw, bcst_nwid, bcst_nwid, num_ops);
+                }
+                send_event(evw, tmp_lm_ptr, LANE_MSG_SIZE, cont);
+            }
+            bcst_nwid = bcst_nwid + nwid_stride;
+            num_children = num_children + 1;
+        }
+        if (DEBUG_FLAG) {
+            print("Global init finished sending broadcasts, num_pending_children=%lu", num_children);
+        }
+        cont = CCONT;
+        val1 = 0;
+        val2 = 0;
+        val3 = 0;
+        val4 = 0;
+        yield;
+    }
+
+    event global_sync (long val_op_1, long val_op_2, long val_op_3, long val_op_4) {
+        long num_ops = ((CEVNT >> 20) & 7) + 2;
+        if (num_ops > MAX_NUM_BCST_VALUES) {
+            // Up to 4 values supported
+            num_ops = MAX_NUM_BCST_VALUES;
+        }
+        for (long i = 0; i < num_ops; i = i + 1) {
+            if (i == 0) {
+                val1 = val1 + val_op_1;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][global_sync] Adding val_op_1=%lu to val1=%lu, new val1=%lu", NETID, val_op_1, val1 - val_op_1, val1);
+                }
+            }
+            if (i == 1) {
+                val2 = val2 + val_op_2;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][global_sync] Adding val_op_2=%lu to val2=%lu, new val2=%lu", NETID, val_op_2, val2 - val_op_2, val2);
+                }
+            }
+            if (i == 2) {
+                val3 = val3 + val_op_3;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][global_sync] Adding val_op_3=%lu to val3=%lu, new val3=%lu", NETID, val_op_3, val3 - val_op_3, val3);
+                }
+            }
+            if (i == 3) {
+                val4 = val4 + val_op_4;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][global_sync] Adding val_op_4=%lu to val4=%lu, new val4=%lu", NETID, val_op_4, val4 - val_op_4, val4);
+                }
+            }
+        }
+
+        num_children = num_children - 1;
+        if (DEBUG_FLAG) {
+            print("[NWID %d][global_sync] Node returned to global_sync from src_evw %lu with num_values %lu, num_pending_children %lu", NETID, CCONT, num_ops, num_children);
+        }
+        if (num_children > 0) {
+            yield;
+        }
+        long *local tmp_lm_ptr = LMBASE + SEND_BUFFER_OFFSET;
+        tmp_lm_ptr[0] = val1;
+        tmp_lm_ptr[1] = val2;
+        if (num_ops <= 2) {
+            // Two or less than two values to send back
+            send_event(cont, tmp_lm_ptr, 2, IGNRCONT);
+            if (DEBUG_FLAG) {
+                print("All node broadcasts returned, global sync finished, returning to cont=%lu with val1=%lu, val2=%lu.", cont, val1, val2);
+            }
+            yield_terminate;
+        } elif  (num_ops == 3) {
+            tmp_lm_ptr[2] = val3;
+            // Three values to send back
+            send_event(cont, tmp_lm_ptr, 3, IGNRCONT);
+            if (DEBUG_FLAG) {
+                print("All node broadcasts returned, global sync finished, returning to cont=%lu with val1=%lu, val2=%lu, val3=%lu.", cont, val1, val2, val3);
+            }
+            yield_terminate;
+        } elif  (num_ops == 4) {
+            tmp_lm_ptr[2] = val3;
+            tmp_lm_ptr[3] = val4;
+            // Four values to send back
+            send_event(cont, tmp_lm_ptr, 4, IGNRCONT);
+            if (DEBUG_FLAG) {
+                print("All node broadcasts returned, global sync finished, returning to cont=%lu with val1=%lu, val2=%lu, val3=%lu, val4=%lu.", cont, val1, val2, val3, val4);
+            }
+            yield_terminate;    
+        } else {
+            print("Error: Unsupported number of values %lu in global_sync.", num_ops);
+            
+            tmp_lm_ptr[2] = val3;
+            tmp_lm_ptr[3] = val4;
+            send_event(cont, tmp_lm_ptr, MAX_NUM_BCST_VALUES, IGNRCONT);
+        }
+        yield_terminate;
+    }
+
+    event broadcast_nodes(unsigned long num_nodes_op, unsigned long dst_evw, long values) {
+        if (DEBUG_FLAG) {
+            print("[NWID %d] Node broadcast called with num_nodes=%lu, dst_evw=%lu(0x%lx), values=0x%lx", NETID, num_nodes_op & 0xFFFFFFFF, dst_evw, dst_evw, values);
+        }
+        unsigned long num_nodes = num_nodes_op & 0xFFFFFFFF;
+        unsigned long k = num_nodes_op >> 32;
+
+        if (num_nodes < k) {
+            // If the number of nodes is less than fan out parameter k, set ndid_stride to 1
+            // so that each node sends to one child node at leavels of the tree
+            ndid_stride = 1;
+        } else {
+            // Calculate the stride between node IDs for each level of the broadcast tree
+            ndid_stride = num_nodes / k;
+        }
+        nwid_stride = ndid_stride * LANE_PER_UD * UD_PER_NODE;
+        if (DEBUG_FLAG) {
+            print("Calculated ndid_stride=%lu nwid_stride=%lu for num_nodes=%lu, k=%lu", ndid_stride, nwid_stride, num_nodes, k);
+        }
+
+        long evw;
+        if (ndid_stride == 1) {
+            if (DEBUG_FLAG) {
+                print("Leaf node reached, no further broadcast needed, send dst_event %u to num_nodes=%lu.", dst_evw, num_nodes);
+            }
+            evw = dst_evw;
+            unsigned long bcst_nwid = NETID;
+            cont = evw_update_event(CEVNT, node_sync);
+            num_children = 0;
+            // Copy the operands to the send buffer in local memory
+            long num_ops = ((CEVNT >> 20) & 7);
+            for (unsigned long i = 0; i < num_nodes; i = i + ndid_stride) {
+                evw = evw_update_netid(evw, bcst_nwid);
+                if (DEBUG_FLAG) {
+                    print("Sending broadcast event %lu to destination ndid=%lu, nwid=%lu(0x%lx)", evw, NETID + i, bcst_nwid, bcst_nwid);
+                }
+                send_ops(evw, values, num_ops, cont);
+                bcst_nwid = bcst_nwid + nwid_stride;
+                num_children = num_children + 1;
+            }
+
+        } else {
+            long* local tmp_lm_ptr = LMBASE + SEND_BUFFER_OFFSET;
+            evw = evw_new(NETID, broadcast_nodes);
+            if (1){
+                // Copy the operands to the send buffer in local memory
+                long num_ops = ((CEVNT >> 20) & 7) + 2;
+                asm {
+                    "bcpyol X8 %[tmp_lm_ptr] %[num_ops]"
+                }: [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_ops] "r" (num_ops);
+            }
+            nwid_stride = ndid_stride * LANE_PER_UD * UD_PER_NODE;
+            tmp_lm_ptr[0] = k << 32 | ndid_stride;
+            unsigned long bcst_nwid = NETID;
+            cont = evw_update_event(CEVNT, node_sync);
+            num_children = 0;
+            for (unsigned long i = 0; i < num_nodes; i = i + ndid_stride) {
+                if (DEBUG_FLAG) {
+                    print("Sending node broadcast to ndid=%lu, nwid=%lu(0x%lx)", i, bcst_nwid, bcst_nwid);
+                }
+                if (i + ndid_stride >= num_nodes) {
+                    // Last child, adjust the ndid_stride to cover all remaining nodes
+                    long tmp_val = num_nodes - i;
+                    tmp_lm_ptr[0] = (k << 32) | tmp_val;
+                }
+                evw = evw_update_netid(evw, bcst_nwid);
+                send_event(evw, tmp_lm_ptr, LANE_MSG_SIZE, cont);
+                bcst_nwid = bcst_nwid + nwid_stride;
+                num_children = num_children + 1;
+            }
+        }
+        cont = CCONT;
+        val1 = 0;
+        val2 = 0;
+        val3 = 0;
+        val4 = 0;
+        yield;
+    }
+
+    event node_sync(long val_op_1, long val_op_2, long val_op_3, long val_op_4) {
+        long num_ops = ((CEVNT >> 20) & 7) + 2;
+        if (num_ops > MAX_NUM_BCST_VALUES) {
+            // Up to 4 values supported
+            num_ops = MAX_NUM_BCST_VALUES;
+        }
+        for (long i = 0; i < num_ops; i = i + 1) {
+            if (i == 0) {
+                val1 = val1 + val_op_1;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][node_sync] Adding val_op_1=%lu to val1=%lu, new val1=%lu", NETID, val_op_1, val1 - val_op_1, val1);
+                }
+            }
+            if (i == 1) {
+                val2 = val2 + val_op_2;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][node_sync] Adding val_op_2=%lu to val2=%lu, new val2=%lu", NETID, val_op_2, val2 - val_op_2, val2);
+                }
+            }
+            if (i == 2) {
+                val3 = val3 + val_op_3;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][node_sync] Adding val_op_3=%lu to val3=%lu, new val3=%lu", NETID, val_op_3, val3 - val_op_3, val3);
+                }
+            }
+            if (i == 3) {
+                val4 = val4 + val_op_4;
+                if (DEBUG_FLAG) {
+                    print("[NWID %d][node_sync] Adding val_op_4=%lu to val4=%lu, new val4=%lu", NETID, val_op_4, val4 - val_op_4, val4);
+                }
+            }
+        }
+        num_children = num_children - 1;
+        if (DEBUG_FLAG) {
+            print("[NWID %d][node_sync] Node broadcast returned to node sync from src_evw %lu with num_ops %lu, num_pending_children %lu", NETID, CCONT, num_ops, num_children);
+        }
+        if (num_children > 0) {
+            yield;
+        }
+        long *local tmp_lm_ptr = LMBASE + SEND_BUFFER_OFFSET;
+        tmp_lm_ptr[0] = val1;
+        tmp_lm_ptr[1] = val2;
+        if (num_ops <= 2) {
+            // Two or less than two values to send back
+            send_event(cont, tmp_lm_ptr, 2, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Node sync returning to cont=%lu with val1=%lu, val2=%lu.", cont, val1, val2);
+            }
+            yield_terminate;
+        } elif  (num_ops == 3) {
+            tmp_lm_ptr[2] = val3;
+            // Three values to send back
+            send_event(cont, tmp_lm_ptr, 3, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Node sync returning to cont=%lu with val1=%lu, val2=%lu, val3=%lu.", cont, val1, val2, val3);
+            }
+            yield_terminate;
+        } elif  (num_ops == 4) {
+            tmp_lm_ptr[2] = val3;
+            tmp_lm_ptr[3] = val4;
+            // Four values to send back
+            send_event(cont, tmp_lm_ptr, 4, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Node sync evw = %lu returning to cont=%lu with val1=%lu, val2=%lu, val3=%lu, val4=%lu.", CEVNT, cont, val1, val2, val3, val4);
+            }
+            yield_terminate;    
+        } else {
+            print("Error: Unsupported number of values %lu in node_sync.", num_ops);
+            
+            tmp_lm_ptr[2] = val3;
+            tmp_lm_ptr[3] = val4;
+            send_event(cont, tmp_lm_ptr, MAX_NUM_BCST_VALUES, CEVNT);
+        }
+        yield_terminate;
+    }
+}
+
+thread GlobalSync {
+
+    long sync_value;
+    long num_pending_ack;
+    long accum_value;
+    long num_values;
+    long num_lanes;
+
+    long val1;
+    long val2;
+
+    long counter_offset;
+    long val1_offset;
+    long val2_offset;
+
+    event global_init(unsigned long num_lanes_op, long sync_value_op, long num_values_op, long counter_offset_op, long val1_offset_op, long val2_offset_op) {
+
+        sync_value = sync_value_op;
+        accum_value = 0;
+        val1 = 0;
+        val2 = 0;
+
+        counter_offset = counter_offset_op;
+        num_values = num_values_op;
+        num_lanes = num_lanes_op;
+        if (DEBUG_FLAG) {
+            print("Global sync init called with num_lanes=%lu, sync_value=%lu, counter_offset=%lu, num_values=%lu", num_lanes, sync_value, counter_offset, num_values);
+        }
+        if (num_values > MAX_NUM_SYNC_VALUES) {
+            // Up to 4 values supported
+            num_values = MAX_NUM_SYNC_VALUES;
+            print("Warning: Limiting number of values to %lu in global_sync.", num_values);
+        }
+        long num_nodes;
+        if (1){
+            // Calculate the number of nodes involved in the global sync
+            // based on the number of lanes
+            long lanes_per_nd = LANE_PER_UD * UD_PER_NODE;
+            num_nodes = num_lanes_op / lanes_per_nd;
+            if (num_lanes_op % lanes_per_nd != 0) {
+                num_nodes = num_nodes + 1;
+            }
+
+            if (DEBUG_FLAG) {
+                print("Calculated num_nodes=%lu for num_lanes=%lu", num_nodes, num_lanes_op);
+            }
+        }
+        
+        if (num_nodes >= DEFAULT_FANOUT) {
+            
+            long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+            send_buffer[0] = num_nodes;
+            if (1) {
+                long evw = evw_new(NETID, NodeSync::node_bcst);
+                send_buffer[1] = evw;
+            }
+            send_buffer[2] = NETID << 32 | num_lanes_op;
+            send_buffer[3] = num_values;
+            if (1){
+                // Copy the operands to the send buffer in local memory
+                long *local tmp_lm_ptr = send_buffer + (4 * WORD_SIZE);
+                asm {
+                    "bcpyol %[value_offsets] %[tmp_lm_ptr] %[num_values]"
+                }: [value_offsets] "r" (counter_offset_op), [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_values] "r" (num_values);
+            }
+            if (1) {
+                long evw = evw_new(NETID, KnaryBroadcastNode::global_init);
+                send_event(evw, send_buffer, LANE_MSG_SIZE, global_sync);
+
+                if (DEBUG_FLAG) {
+                    print("Global sync init sent broadcast to evw=%lu(0x%lx) for num_nodes=%lu", evw, evw, num_nodes);
+                }
+            }
+
+            num_pending_ack = 1;
+        } else {
+            if (DEBUG_FLAG) {
+                print("Global sync init proceeding with direct sends for num_nodes=%lu", num_nodes);
+            }
+
+            long evw = evw_new(NETID, NodeSync::node_bcst);
+            long nwid = NETID;
+            long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+            send_buffer[0] = NETID << 32 | num_lanes_op;
+            send_buffer[1] = num_values;
+            if (1){
+                // Copy the operands to the send buffer in local memory
+                long *local tmp_lm_ptr = send_buffer + (2 * WORD_SIZE);
+                asm {
+                    "bcpyol %[value_offsets] %[tmp_lm_ptr] %[num_values]"
+                }: [value_offsets] "r" (counter_offset_op), [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_values] "r" (num_values);
+            }
+
+            for (long i = 0; i < num_nodes; i++){
+                if (DEBUG_FLAG) {
+                    print("Sending global sync to node %lu nwid=%lu(0x%lx)", i, nwid, nwid);
+                }
+                evw = evw_update_netid(evw, nwid);
+                send_event(evw, send_buffer, LANE_MSG_SIZE, global_sync);
+                nwid = nwid + (LANE_PER_UD * UD_PER_NODE);
+            }
+            num_pending_ack = num_nodes;
+        }
+
+        if (DEBUG_FLAG) {
+            print("Global sync init finished, num_pending_ack=%lu", num_pending_ack);
+        }
+        if (num_values > 1) {
+            val1_offset = val1_offset_op;
+        }
+        if (num_values > 2) {
+            val2_offset = val2_offset_op;
+        }
+        yield;
+    }
+
+    event global_sync(long accum_val_op, long val1_op, long val2_op) {
+        accum_value = accum_value + accum_val_op;
+        if (num_values > 1) {
+            val1 = val1 + val1_op;
+        }
+        if (num_values > 2) {
+            val2 = val2 + val2_op;
+        }
+        num_pending_ack = num_pending_ack - 1;
+        if (DEBUG_FLAG) {
+            print("Global sync received ack with accum_val_op=%lu, val1_op=%lu, val2_op=%lu, accum_value=%lu, num_pending_ack=%lu", accum_val_op, val1_op, val2_op, accum_value, num_pending_ack);
+        }
+        if (num_pending_ack > 0) {
+            yield;
+        }
+        if (accum_value != sync_value) {
+            if (DEBUG_FLAG) {
+                print("Global sync accum_value=%lu does not match expected sync_value=%lu, repeat the global sync", accum_value, sync_value);
+            }
+            long evw = evw_new(NETID, global_init);
+
+            long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+            send_buffer[0] = num_lanes;
+            send_buffer[1] = sync_value;
+            send_buffer[2] = num_values;
+            send_buffer[3] = counter_offset;
+            if (num_values > 1) {
+                send_buffer[4] = val1_offset;
+            }
+            if (num_values > 2) {
+                send_buffer[5] = val2_offset;
+            }
+            send_event(evw, send_buffer, LANE_MSG_SIZE, CCONT);
+            yield_terminate;
+
+        } else {
+            if (DEBUG_FLAG) {
+                print("Global sync accum_value=%lu matches expected sync_value=%lu, completing global sync", accum_value, sync_value);
+            }
+            long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+            send_buffer[0] = accum_value;
+            if (num_values > 1) {
+                send_buffer[1] = val1;
+                if (DEBUG_FLAG) {
+                    print("Global sync preparing to send val1=%lu", val1);
+                }
+            }
+            if (num_values > 2) {
+                send_buffer[2] = val2;
+                if (DEBUG_FLAG) {
+                    print("Global sync preparing to send val2=%lu", val2);
+                }
+            }
+            send_event(CCONT, send_buffer, LANE_MSG_SIZE, IGNRCONT);
+            yield_terminate;
+        }
+    }
+
+}
+
+thread NodeSync {
+
+    long num_pending_ack;
+    long num_values;
+    long accum_value;
+    long val1;
+    long val2;
+    unsigned long cont;
+
+    event node_bcst(unsigned long lane_range_op, unsigned long num_values_op, long counter_offset_op, long val1_offset_op, long val2_offset_op) {
+
+        long num_lanes_in_node;
+        if (1) {
+            long lane_bound = ((lane_range_op << 32) >> 32) + (lane_range_op >> 32);
+            num_lanes_in_node = NETID + (LANE_PER_UD * UD_PER_NODE);
+
+            if (lane_bound < num_lanes_in_node) {
+                num_lanes_in_node = lane_bound - NETID;
+            } else {
+                num_lanes_in_node = (LANE_PER_UD * UD_PER_NODE);
+            }
+        }
+        
+        if (DEBUG_FLAG) {
+            print("Node broadcast called with num_lanes_in_node=%lu, num_values=%lu, counter_offset=%lu", num_lanes_in_node, num_values_op, counter_offset_op);
+            if (num_values_op > 1) {
+                print("val1_offset=%lu", val1_offset_op);
+            }
+            if (num_values_op > 2) {
+                print("val2_offset=%lu", val2_offset_op);
+            }
+        }
+
+        long num_uds = num_lanes_in_node / LANE_PER_UD;
+        if (num_lanes_in_node % LANE_PER_UD != 0) {
+            num_uds = num_uds + 1;
+        }
+
+        long nwid = NETID;
+        long evw = evw_new(NETID, UpdownSync::ud_entry);
+
+        long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+        send_buffer[0] = lane_range_op;
+        send_buffer[1] = num_values_op;
+        long *local tmp_lm_ptr = send_buffer + (2 * WORD_SIZE);
+        num_values = num_values_op;
+        asm {
+            "bcpyol %[counter_offset_op] %[tmp_lm_ptr] %[num_values]"
+        }: [counter_offset_op] "r" (counter_offset_op), [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_values] "r" (num_values);
+
+        for (long i = 0; i < num_uds; i++) {
+            if (DEBUG_DETAIL_FLAG) {
+                print("Node broadcast sending to nwid=%lu(0x%lx)", nwid, nwid);
+            }
+            evw = evw_update_netid(evw, nwid);
+            send_event(evw, send_buffer, LANE_MSG_SIZE, node_sync);
+            nwid = nwid + LANE_PER_UD;
+        }
+        
+        num_pending_ack = num_uds;
+        cont = CCONT;
+        accum_value = 0;
+        val1 = 0;
+        val2 = 0;
+
+        yield;
+    }
+
+    event node_sync(long accum_val_op, long val1_op, long val2_op) {
+        accum_value = accum_value + accum_val_op;
+        if (num_values > 0) {
+            val1 = val1 + val1_op;
+        }
+        if (num_values > 1) {
+            val2 = val2 + val2_op;
+        }
+        num_pending_ack = num_pending_ack - 1;
+        if (DEBUG_DETAIL_FLAG) {
+            if (num_values > 2) {
+                print("Node sync received ack with accum_val_op=%lu, val1_op=%lu, val2_op=%lu, accum_value=%lu, val1=%lu, val2=%lu, num_pending_ack=%lu", accum_val_op, val1_op, val2_op, accum_value, val1,  val2, num_pending_ack);
+            } elif (num_values > 1) {
+                print("Node sync received ack with accum_val_op=%lu, val1_op=%lu, accum_value=%lu, val1=%lu, num_pending_ack=%lu", accum_val_op, val1_op, accum_value, val1, num_pending_ack);
+            } else {
+                print("Node sync received ack with accum_val_op=%lu, accum_value=%lu, num_pending_ack=%lu", accum_val_op, accum_value, num_pending_ack);
+            }
+        }
+        if (num_pending_ack > 0) {
+            yield;
+        }
+        long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+        send_buffer[0] = accum_value;
+        if (num_values > 0) {
+            send_buffer[1] = val1;
+        }
+        if (num_values > 1) {
+            send_buffer[2] = val2;
+        }
+        send_event(cont, send_buffer, LANE_MSG_SIZE, IGNRCONT);
+        yield_terminate;
+    }
+    
+}
+
+thread UpdownSync {
+
+    long accum_value;
+    long val1;
+    long val2;
+
+    event ud_entry (long num_lanes_op, unsigned long num_values_op, long counter_offset_op) {
+        if (DEBUG_DETAIL_FLAG) {
+            print("UD entry called with num_lanes=%lu, num_values=%lu, counter_offset=%lu", num_lanes_op, num_values_op, counter_offset_op);
+        }
+        unsigned long num_iterations = NUM_SYNC_LOOP_ITERS;
+        long nwid = (6 << 27) | NETID;
+        long evw = evw_new(nwid, ud_loop);
+        long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+        send_buffer[0] = num_iterations;
+        send_buffer[1] = num_lanes_op;
+        send_buffer[2] = num_values_op;
+        long *local tmp_lm_ptr = send_buffer + (3 * WORD_SIZE);
+        asm {
+            "bcpyol %[counter_offset_op] %[tmp_lm_ptr] %[num_values]"
+        }: [counter_offset_op] "r" (counter_offset_op), [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_values] "r" (num_values_op);
+        send_event(evw, send_buffer, LANE_MSG_SIZE, CCONT);
+
+        yield_terminate;
+    }
+
+    event ud_loop (unsigned long num_iter_op, long num_lanes_op, unsigned long num_values_op, long counter_offset_op) {
+        unsigned long num_iterations = num_iter_op - 1;
+        if (num_iterations == 0) {
+            if (DEBUG_DETAIL_FLAG) {
+                print("UD loop completed with num_lanes=%lu, num_values=%lu, counter_offset=%lu", num_lanes_op, num_values_op, counter_offset_op);
+            }
+            // Get lane 0 nwid of the current UpDown
+            long nwid = (NETID >> 6) << 6;
+            long evw = evw_new(nwid, ud_accum);
+
+            long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+            send_buffer[0] = num_lanes_op;
+            send_buffer[1] = num_values_op;
+            long *local tmp_lm_ptr = send_buffer + (2 * WORD_SIZE);
+            asm {
+                "bcpyol %[value_offsets] %[tmp_lm_ptr] %[num_values]"
+            }: [value_offsets] "r" (counter_offset_op), [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_values] "r" (num_values_op);
+
+            send_event(evw, send_buffer, LANE_MSG_SIZE, CCONT);
+
+            yield_terminate;
+        }
+
+        long nwid = (6 << 27) | NETID;
+        long evw = evw_new(nwid, ud_loop);
+        long *local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+        send_buffer[0] = num_iterations;
+        long *local tmp_lm_ptr = send_buffer + (1 * WORD_SIZE);
+        long num_ops = num_values_op + 2;
+        asm {
+            "bcpyol %[num_lanes_op] %[tmp_lm_ptr] %[num_ops]"
+        }: [num_lanes_op] "r" (num_lanes_op), [tmp_lm_ptr] "r" (tmp_lm_ptr), [num_ops] "r" (num_ops);
+        send_event(evw, send_buffer, LANE_MSG_SIZE, CCONT);
+
+        yield_terminate;
+    }
+
+    event ud_accum (long lane_range_op, unsigned long num_values_op, long counter_offset_op, long val1_offset_op, long val2_offset_op) {
+        accum_value = 0;
+        val1 = 0;
+        val2 = 0;
+
+        long num_lanes_in_updown;
+        if (1) {
+            long lane_bound = ((lane_range_op << 32) >> 32) + (lane_range_op >> 32);
+            num_lanes_in_updown = NETID + LANE_PER_UD;
+
+            if (lane_bound < num_lanes_in_updown) {
+                num_lanes_in_updown = lane_bound - NETID;
+            } else {
+                num_lanes_in_updown = (LANE_PER_UD);
+            }
+        }
+        if (DEBUG_DETAIL_FLAG) {
+            print("UD accum called with num_lanes_in_updown=%lu, num_values=%lu, counter_offset=%lu", num_lanes_in_updown, num_values_op, counter_offset_op);
+            if (num_values_op > 1) {
+                print("val1_offset=%lu", val1_offset_op);
+            }
+            if (num_values_op > 2) {
+                print("val2_offset=%lu", val2_offset_op);
+            }
+        }
+        long *local lane_lm_base = LMBASE;
+        long *local tmp_lm_ptr;
+        for (long lane = 0; lane < num_lanes_in_updown; lane = lane + 1) {
+            tmp_lm_ptr = lane_lm_base + counter_offset_op;
+            accum_value = accum_value + *tmp_lm_ptr;
+            if (DEBUG_DETAIL_FLAG) {
+                print("Addr %lu: adding counter value=%lu to accum_value=%lu, new accum_value=%lu", tmp_lm_ptr, *tmp_lm_ptr, accum_value - *tmp_lm_ptr, accum_value);
+            }
+            if (num_values_op > 1) {
+                tmp_lm_ptr = lane_lm_base + val1_offset_op;
+                val1 = val1 + *tmp_lm_ptr;
+                if (DEBUG_DETAIL_FLAG) {
+                    print("Addr %lu: adding val1 value=%lu to val1=%lu, new val1=%lu", tmp_lm_ptr, *tmp_lm_ptr, val1 - *tmp_lm_ptr, val1);
+                }
+            }
+            if (num_values_op > 2) {
+                tmp_lm_ptr = lane_lm_base + val2_offset_op;
+                val2 = val2 + *tmp_lm_ptr;
+                if (DEBUG_DETAIL_FLAG) {
+                    print("Addr %lu: adding val2 value=%lu to val2=%lu, new val2=%lu", tmp_lm_ptr, *tmp_lm_ptr, val2 - *tmp_lm_ptr, val2);
+                }
+            }
+            lane_lm_base = lane_lm_base + (1 << 16);
+        }
+        if (DEBUG_DETAIL_FLAG) {
+            print("UD accum completed with num_values=%lu accum_value=%lu, val1=%lu, val2=%lu", num_values_op, accum_value, val1, val2);
+        }
+
+        // Send the accumulated values back to the parent node
+        if (num_values_op > 2) {
+            send_event(CCONT, accum_value, val1, val2, IGNRCONT);
+        } elif (num_values_op > 1) {
+            send_event(CCONT, accum_value, val1, IGNRCONT);
+        } else {
+            send_event(CCONT, accum_value, accum_value, IGNRCONT);
+        }
+        yield_terminate;
+    }
+}

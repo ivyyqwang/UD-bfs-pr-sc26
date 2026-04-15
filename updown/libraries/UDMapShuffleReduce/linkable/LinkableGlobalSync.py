@@ -1,6 +1,9 @@
 from linker.EFAProgram import efaProgram, EFAProgram
 from KVMSRMachineConfig import *
 from Macro import *
+# from LMStaticMap import *
+from libraries.LMStaticMaps.LMStaticMap import *
+from KVMSRMachineConfig import *
 
 class Broadcast:
     
@@ -11,6 +14,7 @@ class Broadcast:
         self.debug_flag = debug_flag
         self.print_level = 1 if self.debug_flag else 0
         self.multiple_label = "modular_eq_zero"
+        self.MAX_NODE_BCST_CHILDREN = 32
         
         self.glb_bcst_ev_label      = get_event_label(self.id, "broadcast_global")
         self.node_bcst_ev_label     = get_event_label(self.id, "broadcast_node")
@@ -18,6 +22,9 @@ class Broadcast:
         self.ud_bcst_fin_ev_label   = get_event_label(self.id, "broadcast_ud_fin")
         self.node_bcst_fin_ev_label = get_event_label(self.id, "broadcast_node_fin")
         self.glb_bcst_fin_ev_label  = get_event_label(self.id, "broadcast_global_fin")
+
+        self.tree_bcst_label        = "KnaryBroadcastNode::global_init"
+        self.tree_bcst_node_dst_ev_label = get_event_label(self.id, "tree_broadcast_node_dst")
         
         self.bcst_val_sp_ev_label   = get_event_label(self.id, "broadcast_value_to_scratchpad")
         
@@ -46,6 +53,8 @@ class Broadcast:
         node_bcst_fin_tran   = self.state.writeTransition("eventCarry", self.state, self.state, self.node_bcst_fin_ev_label)
 
         glb_bcst_fin_tran    = self.state.writeTransition("eventCarry", self.state, self.state, self.glb_bcst_fin_ev_label)
+
+        tree_bcst_node_dst_tran = self.state.writeTransition("eventCarry", self.state, self.state, self.tree_bcst_node_dst_ev_label)
         
         self.scratch    = [f"X{GP_REG_BASE+0}", f"X{GP_REG_BASE+1}", f"X{GP_REG_BASE+2}", f"X{GP_REG_BASE+3}"]
         init_ev_word    = f"X{GP_REG_BASE+4}"
@@ -62,19 +71,73 @@ class Broadcast:
                     X9: event label
                     X10 ~ Xn: data
         '''
+        tree_bcst_label = "tree_broadcast"
         if self.debug_flag:
             glb_bcst_tran.writeAction(f"print ' '")
             glb_bcst_tran.writeAction(f"addi {'X9'} {init_ev_word} 0")
             glb_bcst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Event <{self.glb_bcst_ev_label}> ev_word = %lu num_lanes = %ld init_ev_word = %lu' {'X0'} {'EQT'} {'X8'} {init_ev_word}")
         glb_bcst_tran.writeAction(f"addi {'X8'} {self.num_lane_reg} 0")
         get_num_node(glb_bcst_tran, self.num_lane_reg, self.num_child, self.multiple_label, self.scratch[0])
-        glb_bcst_tran = set_ev_label(glb_bcst_tran, self.ev_word, self.node_bcst_ev_label, new_thread = True, label=self.multiple_label)
+        glb_bcst_tran.writeAction(f"{self.multiple_label}: movir {self.scratch[1]} {self.MAX_NODE_BCST_CHILDREN}")
+        glb_bcst_tran.writeAction(f"bge {self.num_child} {self.scratch[1]} {tree_bcst_label}")
+        glb_bcst_tran = set_ev_label(glb_bcst_tran, self.ev_word, self.node_bcst_ev_label, new_thread = True)
         if self.debug_flag and self.print_level > 3:
             glb_bcst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Broadcast to %ld nodes' {'X0'} {self.num_child}")
         glb_bcst_tran = broadcast(glb_bcst_tran, self.ev_word, self.num_child, self.glb_bcst_fin_ev_label, \
             (LOG2_LANE_PER_UD + LOG2_UD_PER_NODE), f"X8 8", self.scratch, 'ops')
         glb_bcst_tran.writeAction(f"mov_imm2reg {num_finished} 0")
         glb_bcst_tran.writeAction("yield")
+
+        send_buffer = self.scratch[-1]
+        glb_bcst_tran = set_ev_label(glb_bcst_tran, self.ev_word, self.tree_bcst_label, new_thread = True, label=tree_bcst_label)
+        glb_bcst_tran.writeAction(f"addi X7 {send_buffer} {SEND_BUFFER_OFFSET}")
+        glb_bcst_tran.writeAction(f"movrl {self.num_child} 0({send_buffer}) 1 8")
+        if self.debug_flag:
+            glb_bcst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Tree broadcast num_children = %ld' {'X0'} {self.num_child}")
+        glb_bcst_tran = set_ev_label(glb_bcst_tran, init_ev_word, self.tree_bcst_node_dst_ev_label, new_thread=True)
+        glb_bcst_tran.writeAction(f"movrl {init_ev_word} 0({send_buffer}) 1 8")
+        if self.debug_flag:
+            glb_bcst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Tree broadcast dst_evw = %ld' {'X0'} {init_ev_word}")
+        for i in range(0, 7):
+            glb_bcst_tran.writeAction(f"movrl X{i+9} 0({send_buffer}) 1 8")
+            if self.debug_flag:
+                glb_bcst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Tree broadcast send_buffer[{i+2}] = %lu' {'X0'} {f'X{i+9}'}")
+        glb_bcst_tran.writeAction(f"addi X7 {send_buffer} {SEND_BUFFER_OFFSET}")
+        glb_bcst_tran.writeAction(f"send_wcont {self.ev_word} {'X1'} {send_buffer} {8}")
+        glb_bcst_tran.writeAction("yieldt")
+
+
+        
+        '''
+        Event:      Broadcast node event as tree broadcast destination event
+        Operands:   X8: number of lanes
+                    X9: event label
+                    X10 ~ Xn: data
+        '''
+        if self.debug_flag and self.print_level > 3:
+            tree_bcst_node_dst_tran.writeAction(f"print ' '")
+            tree_bcst_node_dst_tran.writeAction(f"addi {'X8'} {init_ev_word} 0")
+            tree_bcst_node_dst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Event <{self.node_bcst_ev_label}> ev_word = %lu init_ev_word = %lu' {'X0'} {'EQT'} {init_ev_word}")
+        tree_bcst_node_dst_tran.writeAction(f"addi X1 {self.saved_cont} 0")
+        tree_bcst_node_dst_tran.writeAction(f"movir {self.num_lane_reg} {UD_PER_NODE * LANE_PER_UD}")
+        tree_bcst_node_dst_tran.writeAction(f"movir {self.num_child} {UD_PER_NODE}")
+        tree_bcst_node_dst_tran = set_ev_label(tree_bcst_node_dst_tran, self.ev_word, self.ud_bcst_ev_label, new_thread = True)
+        if self.debug_flag:
+            tree_bcst_node_dst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Broadcast to %ld updowns' {'X0'} {self.num_child}")
+        tree_bcst_node_dst_tran.writeAction(f"addi X7 {send_buffer} {SEND_BUFFER_OFFSET}")
+        tree_bcst_node_dst_tran.writeAction(f"movrl {self.num_lane_reg} 0({send_buffer}) 1 8")
+        if self.debug_flag and self.print_level > 3:
+            tree_bcst_node_dst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Set broadcast num_lanes = %ld' {'X0'} {self.num_lane_reg}")
+        for i in range(0, 6):
+            tree_bcst_node_dst_tran.writeAction(f"movrl X{i+8} 0({send_buffer}) 1 {WORD_SIZE}")
+            if self.debug_flag and self.print_level > 3:
+                tree_bcst_node_dst_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Tree broadcast send_buffer[{i+1}] = %lu' {'X0'} {f'X{i+8}'}")
+        tree_bcst_node_dst_tran.writeAction(f"addi X7 {send_buffer} {SEND_BUFFER_OFFSET}")
+        tree_bcst_node_dst_tran = broadcast(tree_bcst_node_dst_tran, self.ev_word, self.num_child, self.node_bcst_fin_ev_label, \
+            (LOG2_LANE_PER_UD), f"{send_buffer} {LANE_MSG_SIZE}", self.scratch, '')
+        tree_bcst_node_dst_tran.writeAction(f"mov_imm2reg {num_finished} 0")
+        tree_bcst_node_dst_tran.writeAction("yield")
+
 
         '''
         Event:      Broadcast node
@@ -191,7 +254,7 @@ class Broadcast:
 class GlobalSync:
     NUM_DELAYS = 10
 
-    def __init__(self, state: EFAProgram.State, identifier: str, ev_word_reg: str, lm_offsets: int, scratch_regs: list, debug_flag = False, print_level = 0, send_temp_reg_flag = True):
+    def __init__(self, state: EFAProgram.State, identifier: str, ev_word_reg: str, lm_offsets: list, scratch_regs: list, debug_flag = False, print_level = 0, send_temp_reg_flag = True):
         self.state      = state
         self.id         = identifier
         self.ev_word    = ev_word_reg
@@ -200,6 +263,8 @@ class GlobalSync:
         self.debug_flag = debug_flag
         self.print_level = print_level
         self.send_temp_reg_flag = send_temp_reg_flag
+
+        self.MAX_NODE_BCST_CHILDREN = 32
         
         self.glb_sync_init_ev_label = f"{self.id}::init_global_snyc"
         self.nd_sync_init_ev_label  = f"{self.id}::init_node_sync"
@@ -208,6 +273,8 @@ class GlobalSync:
         self.ud_loop_ev_label       = f"{self.id}::ud_delay"
         self.glb_sync_ret_ev_label  = f"{self.id}::global_sync_return"
         self.nd_sync_ret_ev_label   = f"{self.id}::node_sync_return"
+
+        self.glb_sync_ev_lable      = "GlobalSync::global_init"
         
         self.global_init_tran   = self.state.writeTransition("eventCarry", self.state, self.state, self.glb_sync_init_ev_label)
 
@@ -226,16 +293,25 @@ class GlobalSync:
         num_ln_per_ud   = f"X{GP_REG_BASE+2}"
         self.saved_cont = f"X{GP_REG_BASE+3}"
         lm_base         = f"X{GP_REG_BASE+4}"
+        send_buffer     = f"X{GP_REG_BASE+5}"
+        temp_value     = f"X{GP_REG_BASE+6}"
         
         max_node_label  = "max_node"
         max_ud_label    = "max_ud_per_nd"
         max_ln_label    = "max_ln_per_ud"
         self.sync_fin_label  = "sync_finish"
+        tree_broadcast_label  = "tree_broadcast_global_sync"
 
         if self.debug_flag and self.print_level > 5:
             self.global_init_tran.writeAction(f"print ' '")
             self.global_init_tran.writeAction(f"print '[DEBUG][NWID %lld] Event <{self.glb_sync_init_ev_label}> ev_word = %lu' {'X0'} {'EQT'}")
         
+        self.global_init_tran.writeAction(f"movir {temp_value} {UD_PER_NODE * LANE_PER_UD}")
+        self.global_init_tran.writeAction(f"muli {temp_value} {temp_value} {self.MAX_NODE_BCST_CHILDREN}")
+        self.global_init_tran.writeAction(f"bge {num_lanes} {temp_value} {tree_broadcast_label}")
+
+        # If the number of lanes is small, use legacy broadcast path
+        # Calculate num_nodes, num_ud_per_node, num_lane_per_ud
         get_num_node(self.global_init_tran, num_lanes, num_nodes, max_node_label, self.scratch[0])
         self.global_init_tran.writeAction(f"{max_node_label}: addi {num_nodes} {num_nodes} 0")
         get_num_ud_per_node(self.global_init_tran, num_lanes, num_ud_per_nd, max_ud_label, self.scratch[0])
@@ -243,8 +319,8 @@ class GlobalSync:
         get_num_lane_per_ud(self.global_init_tran, num_lanes, num_ln_per_ud, max_ln_label)
         self.global_init_tran.writeAction(f"{max_ln_label}: addi {num_ln_per_ud} {num_ln_per_ud} 0")
         if self.debug_flag:
-            self.global_init_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] init global synchronization num_nodes = %ld, num_ud_per_node = %ld, num_ln_per_ud = %ld' \
-                {'X0'} {num_nodes} {num_ud_per_nd} {num_ln_per_ud}")
+            self.global_init_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] init global synchronization num_nodes = %ld, num_ud_per_node = %ld, num_ln_per_ud = %ld, sync_value = %lu' \
+                {'X0'} {num_nodes} {num_ud_per_nd} {num_ln_per_ud} {sync_value}")
             
         if isinstance(continuation, str):
             self.global_init_tran.writeAction(f"mov_reg2reg {continuation} {self.saved_cont}")
@@ -276,6 +352,24 @@ class GlobalSync:
         if self.debug_flag or self.print_level == 1:
             self.global_sync_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Global sync terminates, sync_value = %ld, curr_value = %ld' {'X0'} {self.saved_sync_value} {self.curr_values[0]}")
         self.global_sync_tran.writeAction("yield_terminate")
+
+        # If the number of lanes exceeds the limit, use tree broadcast to distribute parameters and do global synchronization 
+        self.global_init_tran.writeAction(f"{tree_broadcast_label}: addi X7 {send_buffer} {SEND_BUFFER_OFFSET}")
+        if self.debug_flag:
+            self.global_init_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Use tree broadcast for global synchronization, num_lanes = %ld, sync_value = %lu' {'X0'} {num_lanes} {sync_value}")
+        self.global_init_tran.writeAction(f"movrl {num_lanes} 0({send_buffer}) 0 8")
+        self.global_init_tran.writeAction(f"movrl {sync_value} 8({send_buffer}) 0 8")
+        self.global_init_tran.writeAction(f"movir {temp_value} {len(self.offsets) if len(self.offsets) < 3 else 3}")
+        if (len(self.offsets) > 3):
+            self.global_init_tran.writeAction(f"print '[DEBUG][NWID %ld][{self.id}] Warning number of offsets = {len(self.offsets)} exceeds the limit: 3 maximum' {'X0'}")
+        self.global_init_tran.writeAction(f"movrl {temp_value} 16({send_buffer}) 0 8")
+        self.global_init_tran.writeAction(f"addi X7 {lm_base} {SEND_BUFFER_OFFSET + (3 * WORD_SIZE)}")
+        for offset in self.offsets:
+            self.global_init_tran.writeAction(f"movir {temp_value} {offset}")
+            self.global_init_tran.writeAction(f"movrl {temp_value} {0}({lm_base}) 1 8")
+        self.global_init_tran = set_ev_label(self.global_init_tran, self.ev_word, self.glb_sync_ev_lable, new_thread = True)
+        self.global_init_tran.writeAction(f"send_wcont {self.ev_word} {'X1'} {send_buffer} {8}")
+        self.global_init_tran.writeAction(f"yieldt")
 
         return 
 

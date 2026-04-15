@@ -211,8 +211,6 @@ class UDKeyValueMapShuffleReduceTemplate(metaclass=ABCMeta):
         self.lane_init_outkvset_ev_label= self.get_event_mapping("init_output_kvset_on_lane")
         self.lane_init_sp_ev_label      = self.get_event_mapping("init_sp_lane")
         
-        print(self.event_map)
-
     def generate_udkvmsr_task(self):
         '''
         Entry point to generate all the assembly code for UDKVMSR.

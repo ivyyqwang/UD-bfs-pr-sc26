@@ -282,7 +282,7 @@ struct Operands {
       return operands[i];
     } else {
       // add fatal message here
-      BASIM_ERROR("Operand index out of bounds, accessing index %d", i);
+      BASIM_ERROR("Operand index out of bounds, accessing index %d, max operands: %d", i, numoperands-1);
     }
   }
 //  ~Operands(){

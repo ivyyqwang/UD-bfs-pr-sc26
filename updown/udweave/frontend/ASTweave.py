@@ -743,7 +743,7 @@ class WeaveStruct(WeaveNode):
     def generate(self, ctx):
         debugMsg(5, f"Generating struct {self.nodeName}")
         types = []
-        newStruct = WeaveIRstructDecl(ctx, self.nodeName)
+        newStruct = WeaveIRStructTypeDecl(ctx, self.nodeName)
         newStruct.setFileLocation(self.fileLocation)
 
         for f in self.fields:
@@ -779,16 +779,16 @@ class WeaveUnion(WeaveNode):
 
     def generate(self, ctx):
         debugMsg(5, f"Generating union {self.nodeName}")
-        types = []
-        newUnion = WeaveIRunionDecl(ctx, self.nodeName)
+        fieldDecls = []
+        newUnion = WeaveIRUnionTypeDecl(ctx, self.nodeName)
         newUnion.setFileLocation(self.fileLocation)
 
         for f in self.fields:
             debugMsg(6, f"Generating field {f.data.get_name()}")
-            ty = f.data.generate(newUnion)
-            types.append(ty)
-
-        newUnion.setFields(types)
+            fieldDecl = f.data.generate(newUnion)
+            fieldDecl.unionStructDecl = newUnion
+            fieldDecls.append(fieldDecl)
+        newUnion.setFields(fieldDecls)
         ctx.ctx_program.addDataTypeDecl(newUnion)
 
 
@@ -848,11 +848,9 @@ class WeaveBinaryOperator(WeaveNode):
 
     def castValues(self, ctx, l, r) -> WeaveIRinstruction:
         if (
-                self.opType != WeaveBinaryOps.MEMORY_DERREF
-                and self.opType != WeaveBinaryOps.STRUCT_ELEMENT_ACCESS
-                and l.dtype and l.dtype != WIRinst.WeaveIRtypes.ptr
-                and r.dtype and r.dtype != WIRinst.WeaveIRtypes.ptr
-                and l.dtype != r.dtype
+                self.opType != WeaveBinaryOps.MEMORY_DEREF and
+                self.opType != WeaveBinaryOps.STRUCT_ELEMENT_ACCESS and
+                l.dtype and r.dtype and l.dtype.checkCast(r.dtype, l.isSigned(), r.isSigned())
         ):
             if isinstance(l, WeaveIRimmediate) and r.dtype != WIRinst.WeaveIRtypes.unknown:
                 debugMsg(3, f"Changing type for right immediate from default {l.dtype} to {r.dtype}")
@@ -1029,6 +1027,7 @@ class WeaveBinaryOperator(WeaveNode):
         Returns:
             WeaveIRinstruction: The instruction added to the basic block
         """
+
         debugMsg(
             5,
             f"Generating arithmetic operation {self.opType.name} in location {str(self.fileLocation)}",
@@ -1139,7 +1138,7 @@ class WeaveBinaryOperator(WeaveNode):
             if l != leftOp:
                 ctx.ctx_scope.endScope()
                 l = leftOp
-        elif self.opType == WeaveBinaryOps.MEMORY_DERREF:
+        elif self.opType == WeaveBinaryOps.MEMORY_DEREF:
             if not l.isPointer:
                 errorMsg(
                     "Trying to dereference a variable that is not a pointer",
@@ -1153,7 +1152,13 @@ class WeaveBinaryOperator(WeaveNode):
 
             offset = r
             if isinstance(offset, WeaveIRDecl) or isinstance(offset, WeaveIRbinaryOps):
-                offsetReg = offset.getAsOperand()
+                offsetReg = r.getAsOperand()
+            elif isinstance(offset, WeaveIRpostOperator):
+                offsetReg = r.getAsOperand()
+                # the issue is that the post operator has already been generated and added to the instructions
+                # of the event (refer to r.generate() near the beginning of this method. We have to remove the last
+                # generated instruction.
+                ctx.ctx_event.curBB.instructions.pop()
             else:
                 offsetReg = offset
 
@@ -1167,16 +1172,18 @@ class WeaveBinaryOperator(WeaveNode):
             inst.quals.remove(WIRinst.WeaveIRqualifiers.spmem)
             inst.setFileLocation(self.fileLocation)
         elif self.opType == WeaveBinaryOps.STRUCT_ELEMENT_ACCESS:
-            if not (isinstance(l.dataType, WeaveIRstructDecl) or isinstance(l.dataType, WeaveIRunionDecl)):
+            if not (isinstance(l.dataType, WeaveIRStructTypeDecl) or isinstance(l.dataType, WeaveIRUnionTypeDecl)):
                 errorMsg(
                     f"Trying to access a struct element from a non-struct type {l.dtype.name}",
                     self.fileLocation,
                 )
             if isinstance(l, WeaveIRDecl):
                 unionStruct = l.dataType
-                ident = unionStruct.getField(r.get_name())
-                debugMsg(3, f"Found field {ident.name} of type {ident.dtype.name}")
-                return ident
+                fieldDecl = unionStruct.getField(r.get_name())
+                if isinstance(unionStruct, WeaveIRUnionTypeDecl):
+                    fieldDecl.unionDecl = unionStruct # for reverse lookup
+                debugMsg(3, f"Found field {fieldDecl.name} of type {fieldDecl.dtype.name}")
+                return fieldDecl
             if isinstance(l, WeaveIRmemory) and l.isLocal():
                 debugMsg(3, f"Found local struct access, adding element offset operand")
                 accessedField: WeaveIRDecl | None = l.dataType.getField(r.get_name())
@@ -1404,14 +1411,14 @@ class WeaveDeclarationStatement(WeaveNode):
         )
         q = [WIRinst.convertASTqual(qual) for qual in q]
 
-        def toStructDecl(structName: str) -> WeaveIRstructDecl:
+        def toStructDecl(structName: str) -> WeaveIRStructTypeDecl:
             """Helper function to find the declaration of a struct
 
             Args:
                 structName (str): name of the struct
 
             Returns:
-                WeaveIRstructDecl: Struct as defined previously in the program
+                WeaveIRStructTypeDecl: Struct as defined previously in the program
             """
             baseDecl = ctx.ctx_program.findDataTypeDecl(structName)
             if len(baseDecl) > 0:
@@ -1426,6 +1433,7 @@ class WeaveDeclarationStatement(WeaveNode):
                     f = copy.copy(f)
                     # create a new list to hold the registers.
                     f.resetVirtualRegs()
+                    f.unionStructDecl = structUnion
                     newFields.append(f)
                 structUnion.setFields(newFields)
                 return structUnion
@@ -1533,11 +1541,10 @@ class WeaveDeclarationStatement(WeaveNode):
             ):
                 # Pointers to struct are just regular registers.
                 # In pointers structures determine the size of the pointer
-
-                ty = copy.copy(ty)
                 ty.setFileLocation(self.fileLocation)
                 ty.assignRegisters(ctx, self.fileLocation)
                 decl = WeaveIRDecl(ctx, self.identifier.data.nodeName, ty, pointee_ty, q)
+                decl.unionStructDecl = ty
             else:
                 reg_num = ctx.ctx_scope.getNextRegisterNumber() if not (self.isStatic or self.isConstant) else None
                 decl = WeaveIRDecl(ctx, self.get_name(), ty, pointee_ty, q, reg_num)
@@ -1643,6 +1650,18 @@ class WeaveAssignStatement(WeaveNode):
             ctx.ctx_scope.endScope()
             return
 
+        # Check, if we are assigning a scalar value to a union or struct
+        if isinstance(ident.dtype, WeaveIRUnionTypeDecl) or isinstance(ident.dtype, WeaveIRStructTypeDecl):
+            errorMsg(
+                f"Trying to assign the variable {val.name} to a union or struct {ident.name}",
+                self.fileLocation,
+            )
+        if isinstance(val.dtype, WeaveIRUnionTypeDecl) or isinstance(val.dtype, WeaveIRStructTypeDecl):
+            errorMsg(
+                f"Trying to assign the variable {ident.name} to a union or struct {val.name}",
+                self.fileLocation,
+            )
+
         if isinstance(val, WeaveIRsymConst):
             debugMsg(
                 5,
@@ -1688,12 +1707,8 @@ class WeaveAssignStatement(WeaveNode):
         #           long* local spmPtr = LMBASE;    // ident is a Ptr
         #           unsigned long someInt = spmPtr;
         if (isinstance(ident, WeaveIRDecl) and
-                (isinstance(val, WeaveIRDecl) or isinstance(val, WeaveIRmemory) or isinstance(val, WeaveIRarith))
-                and not (
-                    val.getAsOperand().dtype == ident.dtype or
-                    ident.dtype.isPointer and val.getAsOperand().dtype.isInteger and not val.getAsOperand().isSigned()
-                    or val.getAsOperand().dtype.isPointer and ident.dtype.isInteger and not ident.isSigned()
-                )
+                (isinstance(val, WeaveIRDecl) or isinstance(val, WeaveIRmemory) or isinstance(val, WeaveIRarith)) and
+                ident.dtype.checkCast(val.getAsOperand().dtype, ident.isSigned(), val.getAsOperand().isSigned())
         ):
             debugMsg(
                 3,
@@ -1788,11 +1803,30 @@ class WeaveAssignStatement(WeaveNode):
                 returnDecl = returnReg.getDecl()
                 if returnDecl.isTemp:
                     ctx.ctx_scope.removeDeclaration(returnDecl)
+                    returnReg.setTemp(False)
             ident.setRetOp(returnReg)
 
         # Finished generating. Let's restart the temp virtualRegs
         ctx.ctx_scope.endScope()
         return [ident]
+
+
+class WeavePostOperator(WeaveNode):
+    def __init__(self, val: WeaveIdentifier, instType, loc: FileLocation):
+        super().__init__()
+        self.type = WeaveASTTypes.PostIncrement
+        self.val = val
+        self.instType = instType
+        self.fileLocation = loc
+
+    def to_string(self):
+        return f"{str(self.type)} <> name={self.val} at {str(self.fileLocation)}"
+
+    def generate(self, ctx):
+        decl = self.val.generate(ctx)
+        op = WeaveIRpostOperator(ctx=ctx, instType=self.instType, ops=[decl])
+        ctx.ctx_event.addInstruction(op)
+        return op
 
 
 class ConditionMixin:
@@ -1860,6 +1894,9 @@ class ConditionMixin:
                 addDecl = self.getDeclFromInstruction(op)
                 if addDecl is not None:
                     decl.extend(addDecl)
+            returnDecl = self.getDeclFromInstruction(instruction.getReturnReg())
+            if returnDecl is not None:
+                decl.extend(returnDecl)
         return decl
 
     def getUsedDecl(self, ctx, numBBbefore: int) -> list:
@@ -1876,9 +1913,6 @@ class ConditionMixin:
         # remove double entries
         foundDecl = list(set(foundDecl))
         return foundDecl
-
-
-
 
     def generatePhis(self, ctx: WeaveIRbase, insts: list, fileLocation: FileLocation) -> None:
         """ Generate a phi instruction for the current basic block. This is used to merge the control flow from
@@ -2181,7 +2215,8 @@ class WeaveForStatement(WeaveNode, ConditionMixin):
             exp.data.generate(ctx)
 
         # Add increment at the end of the body
-        self.increment.data.generate(ctx)
+        if self.increment:
+            self.increment.data.generate(ctx)
         jump_instruction = WeaveIRbranch(ctx, WIRinst.WeaveIRBranchTypes.UNCONDITIONAL, conditionSection)
         jump_instruction.setFileLocation(self.fileLocation)
         ctx.ctx_event.addInstruction(jump_instruction)
@@ -2269,7 +2304,7 @@ class WeaveCall(WeaveNode):
         for arg in self.arguments:
             arg = arg.data.generate(call)
             # If it is a struct, we need to pass the size of the struct.
-            if isinstance(arg, WeaveIRstructDecl):
+            if isinstance(arg, WeaveIRStructTypeDecl):
                 sym = WeaveIRsymPtr(ctx=ctx, namespace="", nameSymbol=arg.name)
                 sym.dataType = WIRinst.WeaveIRuserDefinedType(arg.getSize(self.fileLocation),
                                                               WIRinst.WeaveIRtypes.struct)
@@ -2290,6 +2325,7 @@ class WeaveCall(WeaveNode):
         selectedInputTypes = None
 
         for intr in intrs:
+            quals = intr.getQualifiers()
             for inputTypes in intr.getInputTypes():
                 debugMsg(
                     3,
@@ -2314,6 +2350,18 @@ class WeaveCall(WeaveNode):
                             all_ops = False
                             break
 
+                        # Handle send_event properly
+                        # Example `send_event(i64, ptr, i64, i64): We have to determine, if ptr is local or a global
+                        # address. In case, it is local, a `sendw_cont` is to be generated. If it is global, a
+                        # `sendr_wcont` instruction is to be selected.
+                        if ops[0] == WIRinst.WeaveIRtypes.void or ops[0] == WIRinst.WeaveIRtypes.ptr:
+                            # We have to check the qualifiers
+                            if quals[num] != WIRinst.WeaveIRqualifiers.unknown:
+                                callQuals = call.getInOpQuals()
+                                if quals[num] not in callQuals[num]:
+                                    all_ops = False
+                                    break
+
                 # All operands match?
                 if all_ops:
                     debugMsg(4, f"Operands match! {intr}")
@@ -2321,7 +2369,7 @@ class WeaveCall(WeaveNode):
                     if intr.earlyInline():
                         return intr(call).generateWeaveIR()
                     if intr.getReturnType() is not WIRinst.WeaveIRtypes.void:
-                        if ctx.ctx_declaration is None:
+                        if ctx.ctx_declaration is None or isinstance(ctx.ctx_declaration, WeaveIRmemory):
                             tempDecl = ctx.ctx_scope.getTempDeclaration(
                                 intr.getReturnType(), [WIRinst.WeaveIRqualifiers.unsigned]
                             )

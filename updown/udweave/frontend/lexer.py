@@ -47,7 +47,7 @@ class WeaveLexer(object):
         ("left", "SHFTLFT", "SHFTRGT"),
         ("left", "PLUS", "MINUS"),
         ("left", "TIMES", "DIVIDE", "MODULO"),
-        # ('right', '++', '--'),
+        ('right', 'PLUSPLUS', 'MINUSMINUS'),
         ("right", "NOT"),
         ("right", "BWNOT"),
         # ('nonassoc', '?'),
@@ -76,7 +76,9 @@ class WeaveLexer(object):
         "LSBRACKET",
         "RSBRACKET",
         "PLUS",
+        "PLUSPLUS",
         "MINUS",
+        "MINUSMINUS",
         "TIMES",
         "DIVIDE",
         "MODULO",
@@ -102,7 +104,6 @@ class WeaveLexer(object):
         "COMMA",
         "COMMENT",
         "ELEMENT_ACCESS",
-        "DEREFERENCE",
         "PREPROCESSOR",
     ] + list(set(reserved.values()))
 
@@ -115,7 +116,9 @@ class WeaveLexer(object):
     t_RSBRACKET = r"\]"
 
     t_PLUS = r"\+"
+    t_PLUSPLUS = r"\+\+"
     t_MINUS = r"-"
+    t_MINUSMINUS = r"--"
     t_TIMES = r"\*"
     t_DIVIDE = r"/"
     t_MODULO = r"%"

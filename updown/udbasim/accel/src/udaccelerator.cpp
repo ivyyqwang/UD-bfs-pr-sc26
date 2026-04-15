@@ -157,8 +157,8 @@ namespace basim
 
     /* simulate API for accelerator runs through all lanes */
     void UDAccelerator::simulate(uint64_t numTicks, uint64_t timestamp){
-        int simTicks = 0;
-        while(simTicks < numTicks){
+        int simTicks = 1;
+        while(simTicks <= numTicks){
             for(auto ln = udLanes.begin(); ln != udLanes.end(); ++ln){
                 if(!(*ln)->isIdle())
                     (*ln)->tick(timestamp);
@@ -235,9 +235,9 @@ namespace basim
     
     /* Simulate API to call per lane */
     void UDAccelerator::simulate(uint32_t laneID, uint64_t numTicks, uint64_t timestamp){
-        int simTicks = 0;
-        while(simTicks < numTicks){
-            udLanes[laneID]->tick(timestamp);
+        int simTicks = 1;
+        while(simTicks <= numTicks){
+            udLanes[laneID]->tick(timestamp + simTicks);
             simTicks++;
         }
     }
@@ -246,6 +246,7 @@ namespace basim
         for (auto &ln :udLanes){
             ln->resetStats();
         }
+        udstats->reset();
     }
 
     UDAccelerator::~UDAccelerator(){

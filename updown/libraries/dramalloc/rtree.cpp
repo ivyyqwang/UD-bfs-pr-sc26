@@ -78,6 +78,7 @@ void RTree::removeBlock(Node &node, Block b) {
   for (; i < node.count - 1; i++) {
     node.branches[i] = node.branches[i + 1];
   }
+  node.branches[i] = {0};
   node.count--;
 }
 
@@ -90,6 +91,7 @@ void RTree::removeChild(Node &node, Node *n) {
   for (; i < node.count - 1; i++) {
     node.branches[i] = node.branches[i + 1];
   }
+  node.branches[i] = {0};
   node.count--;
 }
 
@@ -186,6 +188,7 @@ Node *RTree::splitNode(Node *target, Node *newNode) {
   int imax = 0, jmax = 1;
   for (int i = 0; i < entries.size(); i++)
     for (int j = 0; j < entries.size(); j++) {
+    if (i != j) {
       Node *a = entries[i];
       Node *b = entries[j];
       Rect BB = a->rect.boundingBox(b->rect);
@@ -196,6 +199,7 @@ Node *RTree::splitNode(Node *target, Node *newNode) {
         imax = i;
         jmax = j;
       }
+    }
     }
   std::vector<Node *> groupA, groupB;
   Node *a = entries[imax];
@@ -427,8 +431,8 @@ Node *RTree::chooseNode(Node *root, Node *n) {
     Rect r = n->rect.boundingBox(root->branches[i].child->rect);
     newareas.push_back(r.area() - root->branches[i].child->rect.area());
   }
-  int i = std::max_element(newareas.begin(), newareas.end()) - newareas.end();
-  assert(i < root->count);
+  int i = std::max_element(newareas.begin(), newareas.end()) - newareas.begin();
+  assert(i >= 0 && i < root->count);
   return chooseNode(root->branches[i].child, n);
 }
 
@@ -519,7 +523,8 @@ void RTree::remove(Block b) {
   if (this->root->count == 1 && this->root->branches[0].child != nullptr) {
     Node *oldr = this->root;
     this->root = this->root->branches[0].child;
-    this->root->level--;
+    /* preserve the full bb at the root */
+    this->root->rect = oldr->rect;
     this->root->parent = nullptr;
     delete oldr;
   }

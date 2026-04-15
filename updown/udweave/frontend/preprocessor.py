@@ -1,5 +1,5 @@
 from __future__ import annotations
-from Weave.debug import debugMsg, errorMsg
+from Weave.debug import debugMsg, errorMsg, warningMsg
 
 import subprocess
 import os
@@ -46,6 +46,9 @@ class WeavePreprocessor:
         out, err = p.communicate()
         if p.returncode != 0:
             errorMsg("Preprocessor error:\n" + err.decode("utf-8"))
+        else:
+            if len(err) != 0:
+                warningMsg("Preprocessor warning:\n" + err.decode("utf-8"))
         source = out.decode("utf-8")
         debugMsg(1, "Preprocessing done.")
 

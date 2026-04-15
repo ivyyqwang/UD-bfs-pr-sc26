@@ -1,4 +1,7 @@
 from enum import Enum
+
+from pygments.formatters import other
+
 import frontend.ASTweave as ASTweave
 from Weave.WeaveIR import *
 from Weave.debug import debugMsg, errorMsg, warningMsg
@@ -148,6 +151,32 @@ class WeaveIRtypes(Enum):
         if self not in mapValues:
             return ""
         return mapValues[self]
+
+    def checkCast(self, otherType: "WeaveIRtypes", thisSigned: bool, otherSigned: bool) -> bool:
+        """Check if a cast is possible between self and otherType
+
+        Args:
+            otherType (WeaveIRtypes): The type to check conditional cast with
+            thisSigned (bool): Whether self is signed or unsigned
+            otherSigned (bool): Whether otherType is signed or unsigned
+        """
+        return not (
+            # do not cast structs or unions
+            self.isStruct or self.isUnion or
+
+            # if both are integers (even different sizes) or pointers, skip the cast
+            self.isInteger and otherType.isInteger or
+            self.isPointer and otherType.isPointer or
+
+            # in case of floating points, there is no need to add a cast, if both values are floating
+            # points AND they have the same size. If their sizes are different, we need a cast to avoid
+            # losing precision.
+            self.isFloatingPoint and otherType.isFloatingPoint and self == otherType or
+
+            # disallow to use a signed integer to be used as a pointer.
+            self.isPointer and otherType.isInteger and not otherSigned or
+            otherType.isPointer and self.isInteger and not thisSigned
+        )
 
 
 class WeaveIRuserDefinedType:

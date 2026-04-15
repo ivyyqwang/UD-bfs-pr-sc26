@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <pthread.h>
 
 namespace basim {
 
@@ -67,6 +68,8 @@ private:
   private:
     FILE *log_fp;
 
+    pthread_mutex_t mutex;
+
     // Tracelog callback
     void (*tracelog_cb)(uint32_t inc_exec_cycles,  // incremental exec cycles
                         std::string &msg_type_str, // type of message
@@ -74,7 +77,7 @@ private:
                         ) = nullptr;
 
   public:
-    Tracelog() : log_fp(nullptr){};
+    Tracelog() : log_fp(nullptr){pthread_mutex_init(&mutex, NULL);};
 
     ~Tracelog() { this->close(); };
 
@@ -83,15 +86,20 @@ private:
     bool isOpen() { return log_fp != nullptr; };
 
     void open(const std::string &filename) {
+      pthread_mutex_lock(&mutex);
       if (log_fp != nullptr)
         std::fclose(log_fp);
       log_fp = std::fopen(filename.c_str(), "w");
+      pthread_mutex_unlock(&mutex);
     };
 
     void close() {
-      if (log_fp != nullptr) {
-        std::fclose(log_fp);
-        log_fp = nullptr;
+      if(pthread_mutex_trylock(&mutex) == 0){
+        if (log_fp != nullptr) {
+          std::fclose(log_fp);
+          log_fp = nullptr;
+          pthread_mutex_unlock(&mutex);
+        }
       }
     };
 

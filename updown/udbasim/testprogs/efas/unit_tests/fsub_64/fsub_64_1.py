@@ -1,0 +1,25 @@
+from EFA_v2 import *
+def fsub_64_1():
+    efa = EFA([])
+    efa.code_level = "machine"
+    state = State()
+    efa.add_initId(state.state_id)
+    efa.add_state(state)
+    event_map = {
+        "launch_events": 0,
+    }
+    tran0 = state.writeTransition("eventCarry", state, state, event_map['launch_events'])
+# Input arguments: [11128625135041044888, 4026056212660489785]
+    tran0.writeAction("movir X16 39536")
+    tran0.writeAction("slorii X16 X16 12 3353")
+    tran0.writeAction("slorii X16 X16 12 2348")
+    tran0.writeAction("slorii X16 X16 12 2478")
+    tran0.writeAction("slorii X16 X16 12 408")
+    tran0.writeAction("movir X17 14303")
+    tran0.writeAction("slorii X17 X17 12 1740")
+    tran0.writeAction("slorii X17 X17 12 2913")
+    tran0.writeAction("slorii X17 X17 12 1568")
+    tran0.writeAction("slorii X17 X17 12 3641")
+    tran0.writeAction("fsub.64 X16 X17 X18")
+    tran0.writeAction("yieldt")
+    return efa

@@ -502,7 +502,7 @@ class WeaveIRscope(WeaveIRbase):
         if reg is None:
             return None
         for decl in self._declarations:
-            if isinstance(decl.dataType, WeaveIRunionDecl) or isinstance(decl.dataType, WeaveIRstructDecl):
+            if isinstance(decl.dataType, WeaveIRUnionTypeDecl) or isinstance(decl.dataType, WeaveIRStructTypeDecl):
                 for f in decl.dataType.getFields():
                     if reg in f.getRegs:
                         return f
@@ -918,7 +918,7 @@ class WeaveIRpadding(WeaveIRbase):
         return indent_text(f"padding: {self._size}\n", indent)
 
 
-class WeaveIRstructDecl(WeaveIRbase):
+class WeaveIRStructTypeDecl(WeaveIRbase):
     def __init__(self, ctx: WeaveIRbase, name: str, fields: list = None):
         super().__init__(ctx)
         self._name = name
@@ -962,7 +962,7 @@ class WeaveIRstructDecl(WeaveIRbase):
     def assignRegisters(self, ctx: WeaveIRbase, fileLocation: FileLocation):
         """Assign virtual registers to the fields of the type declaration"""
         for f in self._fields:
-            if isinstance(f, WeaveIRstructDecl):
+            if isinstance(f, WeaveIRStructTypeDecl):
                 f.assignRegisters(ctx, fileLocation)
             elif not isinstance(f, WeaveIRpadding):
                 regNum = ctx.ctx_scope.getNextRegisterNumber()
@@ -992,7 +992,7 @@ class WeaveIRstructDecl(WeaveIRbase):
         return indent_text(f"typeDecl {self.name}:\n{fields_string}", indent)
 
 
-class WeaveIRunionDecl(WeaveIRbase):
+class WeaveIRUnionTypeDecl(WeaveIRbase):
     def __init__(self, ctx: WeaveIRbase, name: str, fields: list = None):
         super().__init__(ctx)
         self._name = name
@@ -1028,12 +1028,15 @@ class WeaveIRunionDecl(WeaveIRbase):
 
     def assignRegisters(self, ctx: WeaveIRbase, fileLocation: FileLocation):
         """Assign registers to the fields of the type declaration"""
+
         for f in self._fields:
             regNum = ctx.ctx_scope.getNextRegisterNumber()
+
             debugMsg(
                 5, f"Assigning virtual register {regNum} to the field {self._name}.{f.name}"
             )
-            f.addReg(WeaveIRregister(ctx, None, regNum, WIRinst.WeaveIRregTypes.gpr, f.dtype, f.quals))
+            reg = WeaveIRregister(ctx, None, regNum, WIRinst.WeaveIRregTypes.gpr, f.dtype, f.quals)
+            f.addReg(reg)
             f.setFileLocation(fileLocation)
 
     @property
@@ -1046,8 +1049,8 @@ class WeaveIRunionDecl(WeaveIRbase):
     def getScale(self, fileLocation: FileLocation = None) -> int:
         return 0
 
-    def getAsOperand(self) -> None:
-        errorMsg("Type declaration cannot be used as operand", self.getFileLocation())
+    # def getAsOperand(self) -> None:
+    #     errorMsg("Type declaration cannot be used as operand", self.getFileLocation())
 
     def to_string(self, indent) -> str:
         fields_string = "".join(
@@ -1083,6 +1086,9 @@ class WeaveIRDecl(WeaveIRbase):
         self._physicalReg = None
         self._isTemp = False
 
+        # For reverse lookup, if this declaration referres to a field in a union or struct
+        self.unionStructDecl = None
+
         """
         Usually, a declaration is to be initialized, if its registers are used for reading access. However, there
         is an exception: If an event label is given to an instruction, then this instruction requires a temporary
@@ -1097,16 +1103,22 @@ class WeaveIRDecl(WeaveIRbase):
         Args:
             reg (WeaveIRregister): The register to add
         """
+        if reg in self._virtualRegs:
+            return
         if reg.dtype == WIRinst.WeaveIRtypes.unknown:
             reg.dataType = self.dataType
             reg.setQuals(self.quals)
         reg.toBeInitialized = self.toBeInitialized
         reg.setDecl(self)
-        self.virtualRegs.append(reg)
+        self._virtualRegs.append(reg)
 
     @property
     def name(self):
         return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
 
     def setSize(self, size):
         self._size = size
@@ -1121,13 +1133,7 @@ class WeaveIRDecl(WeaveIRbase):
 
     @property
     def virtualRegs(self):
-        if isinstance(self.dataType, WeaveIRunionDecl) or isinstance(self.dataType, WeaveIRstructDecl):
-            vRegs = []
-            for f in self.dataType.getFields():
-                vRegs.extend(f.getRegs)
-        else:
-            vRegs = self._virtualRegs
-        return vRegs
+        return self._virtualRegs
 
     def resetVirtualRegs(self):
         self._virtualRegs = []
@@ -1178,11 +1184,11 @@ class WeaveIRDecl(WeaveIRbase):
 
     @property
     def isStruct(self):
-        return isinstance(self.dataType, WeaveIRstructDecl)
+        return isinstance(self.dataType, WeaveIRStructTypeDecl)
 
     @property
     def isUnion(self):
-        return isinstance(self.dataType, WeaveIRunionDecl)
+        return isinstance(self.dataType, WeaveIRUnionTypeDecl)
 
     @property
     def isAllocated(self):
@@ -1196,7 +1202,7 @@ class WeaveIRDecl(WeaveIRbase):
         self._isTemp = True
 
     def setPhysicalReg(self, reg):
-        if isinstance(self.dataType, WeaveIRunionDecl) or isinstance(self.dataType, WeaveIRstructDecl):
+        if isinstance(self.dataType, WeaveIRUnionTypeDecl) or isinstance(self.dataType, WeaveIRStructTypeDecl):
             for f in self.dataType.getFields():
                 f.setPhysicalReg(reg)
         self._physicalReg = reg
@@ -1206,7 +1212,7 @@ class WeaveIRDecl(WeaveIRbase):
 
     def updateVirtualRegs(self, virtualRegs: set, physicalReg):
         self._physicalReg = physicalReg
-        if isinstance(self.dataType, WeaveIRunionDecl) or isinstance(self.dataType, WeaveIRstructDecl):
+        if isinstance(self.dataType, WeaveIRUnionTypeDecl) or isinstance(self.dataType, WeaveIRStructTypeDecl):
             for f in self.dataType.getFields():
                 f.updateVirtualRegs(virtualRegs, physicalReg)
         else:
@@ -1246,7 +1252,8 @@ class WeaveIRDecl(WeaveIRbase):
 
     @property
     def getRegs(self):
-        return self.virtualRegs
+        return self._virtualRegs
+
 
     def setRetOp(self, ret_op):
         # the return type is the same as the declaration
@@ -1286,14 +1293,14 @@ class WeaveIRDecl(WeaveIRbase):
         self.references.append(ref_inst)
 
     def to_string(self, indent):
-        if isinstance(self.dataType, WeaveIRstructDecl) or isinstance(self.dataType, WeaveIRunionDecl):
+        if isinstance(self.dataType, WeaveIRStructTypeDecl) or isinstance(self.dataType, WeaveIRUnionTypeDecl):
             return self.dataType.to_string(indent)
 
-        if len(self.virtualRegs) > 0:
+        if len(self.getRegs) > 0:
             priv = "private " if self.isPrivate else ""
             qual = "sig" if self.isSigned() else "unsig"
 
-            virtRegs = ", ".join([r.name for r in set(self.virtualRegs)])
+            virtRegs = ", ".join([r.name for r in self.getRegs])
 
             if self.isStatic:
                 return indent_text(
@@ -1315,18 +1322,18 @@ class WeaveIRDecl(WeaveIRbase):
                     pointeeTypeText = self.pointeeType.name
                 if self.isLocalPointer:
                     return indent_text(
-                        f"{self.virtualRegs[0].name} = alloca {priv}{qual} {pointeeTypeText}* local "
+                        f"{self.getRegs[0].name} = alloca {priv}{qual} {pointeeTypeText}* local "
                         f"{self.fullName} (vRegs: {virtRegs});\n",
                         indent,
                     )
                 return indent_text(
-                    f"{self.virtualRegs[0].name} = alloca {priv}{qual} {pointeeTypeText}* "
+                    f"{self.getRegs[0].name} = alloca {priv}{qual} {pointeeTypeText}* "
                     f"{self.fullName} (vRegs: {virtRegs});\n",
                     indent,
                 )
 
             return indent_text(
-                    f"{self.virtualRegs[0].name} = alloca {priv}{qual} {self.dataType.name} {self.fullName} "
+                    f"{self.getRegs[0].name} = alloca {priv}{qual} {self.dataType.name} {self.fullName} "
                     f"(vRegs: {virtRegs});\n",
                     indent,
                 )
@@ -1338,7 +1345,7 @@ class WeaveIRDecl(WeaveIRbase):
 
 class WeaveIRGlobalDecl(WeaveIRDecl):
     def __init__(self, ctx, var_name, typ, quals=None, var_data=None):
-        super().__init__(ctx)
+        super().__init__(ctx, var_name, typ, quals=quals)
 
         if quals is None:
             quals = []
@@ -1404,7 +1411,7 @@ class WeaveIRthreadDecl(WeaveIRDecl):
 
     def to_string(self, indent):
         priv = "private " if self.isPrivate else ""
-        virtRegs = ", ".join([r.name for r in set(self.virtualRegs)])
+        virtRegs = ", ".join([r.name for r in set(self.getRegs)])
         if self.isStatic:
             return indent_text(
                 f"static {priv}{self.dataType.name} {self.ctx_thread.name}::{self.name};\n",
@@ -1416,7 +1423,7 @@ class WeaveIRthreadDecl(WeaveIRDecl):
             )
 
         return indent_text(
-            f"thread_local {self.virtualRegs[0].name} {self.dataType.name} {self.name} (vRegs: {virtRegs});\n",
+            f"thread_local {self.getRegs[0].name} {self.dataType.name} {self.name} (vRegs: {virtRegs});\n",
             indent,
         )
 
@@ -1541,7 +1548,7 @@ class WeaveIRimmediate(WeaveIRinstruction):
         # if the data type has not been set or the data type is a type declaration, infer the data type based on the
         # value. The latter condition is true, if in a conditional statement, the field of a struct is compared against
         # a literal. In this case, the data type is from the struct, which is unknown.
-        if dataType is None or isinstance(dataType, WeaveIRstructDecl) or isinstance(dataType, WeaveIRunionDecl):
+        if dataType is None or isinstance(dataType, WeaveIRStructTypeDecl) or isinstance(dataType, WeaveIRUnionTypeDecl):
             self._inferType()
         else:
             self.dataType = dataType
@@ -1552,7 +1559,7 @@ class WeaveIRimmediate(WeaveIRinstruction):
     def setValue(self, v):
         # If the value is an FP, convert it to an integer bit representation
         self._originalValue = v
-        if isinstance(self.dtype, WeaveIRstructDecl) or isinstance(self.dtype, WeaveIRunionDecl):
+        if isinstance(self.dtype, WeaveIRStructTypeDecl) or isinstance(self.dtype, WeaveIRUnionTypeDecl):
             errorMsg("Cannot assign a literal to a struct or union", self.getFileLocation())
         if self.dtype.isFloatingPoint:
             if self.dtype == WIRinst.WeaveIRtypes.float:
@@ -1752,10 +1759,14 @@ class WeaveIRbinaryOps(WeaveIRinstruction):
         self.instType = op
 
     def setLeft(self, left):
+        if isinstance(left, WeaveIRDecl):
+            left = left.getAsOperand()
         self._in_ops[0] = left
         self._setQualifierBasedOnOperands()
 
     def setRight(self, right):
+        if isinstance(right, WeaveIRDecl):
+            right = right.getAsOperand()
         self._in_ops[1] = right
         self._setQualifierBasedOnOperands()
 
@@ -1789,6 +1800,12 @@ class WeaveIRbinaryOps(WeaveIRinstruction):
             except ValueError:
                 pass
             self.setQuals(qualifiers)
+
+        # remaining qualifiers (e.g. spmem)
+        if (self.left and WIRinst.WeaveIRqualifiers.spmem in self.left.quals or
+                self.right and WIRinst.WeaveIRqualifiers.spmem in self.right.quals):
+            self.addQualifier(WIRinst.WeaveIRqualifiers.spmem)
+
 
     def getAsOperand(self):
         return self._ret_op
@@ -1897,6 +1914,37 @@ class WeaveIRcompare(WeaveIRbinaryOps):
         return indent_text(string, indent)
 
 
+class WeaveIRpostOperator(WeaveIRinstruction):
+    def __init__(self, ctx, instType, ops: list = None):
+        super().__init__(ctx)
+        ctx.ctx_instruction = self
+        self.instType = instType
+        self._in_ops = ops
+
+    def to_string(self, indent):
+
+        if not self.getReturnReg().isGPR:
+            errorMsg(
+                "Result of binary operations must be stored in a general purpose register. "
+                f"received {self.getReturnReg().name}",
+                self.getFileLocation(),
+            )
+
+        if not self.instType or self.instType is WIRinst.WeaveIRarithTypes.UNKNOWN:
+            errorMsg("Unknown arithmetic operation", self.getFileLocation())
+
+        qual = "sig" if self.isSigned() else "unsig"
+        return indent_text(
+            f"{self.getReturnReg().name} = {self.instType.value} {qual} {self._in_ops[0].name}, 1",
+            indent,
+        )
+
+    def getAsOperand(self):
+        return self._in_ops[0].curReg
+
+    def getReturnReg(self):
+        return self._in_ops[0].curReg
+
 
 class WeaveIRmemory(WeaveIRinstruction):
     def __init__(self, ctx, dataType: WIRinst.WeaveIRtypes, opType: WIRinst.WeaveIRmemoryTypes, ops: list = None):
@@ -1982,6 +2030,7 @@ class WeaveIRmemory(WeaveIRinstruction):
             self.getFieldDecl(),
             self.getFieldReg(),
             self.getValueToStore(),
+            self.getReturnReg() if self.instType == WIRinst.WeaveIRmemoryTypes.LOAD else None,
         ]
 
     def isLocal(self):
@@ -1995,12 +2044,12 @@ class WeaveIRmemory(WeaveIRinstruction):
         """ Get the data type of the instruction. If the memory instruction is for dereferencing a struct, return the
         type of the accessed field, if it is set. Otherwise, return that this type is a struct. If it is not a struct,
         just return the type of the scalar value."""
-        if isinstance(self.dataType, WeaveIRstructDecl):
+        if isinstance(self.dataType, WeaveIRStructTypeDecl):
             accessedField = self.getFieldDecl()
             if accessedField:
                 return accessedField.dataType
             return WIRinst.WeaveIRtypes.struct
-        elif isinstance(self.dataType, WeaveIRunionDecl):
+        elif isinstance(self.dataType, WeaveIRUnionTypeDecl):
             accessedField = self.getFieldDecl()
             if accessedField:
                 return accessedField.dataType
@@ -2010,7 +2059,7 @@ class WeaveIRmemory(WeaveIRinstruction):
 
     @property
     def quals(self):
-        if ((isinstance(self.dataType, WeaveIRstructDecl) or isinstance(self.dataType, WeaveIRunionDecl))
+        if ((isinstance(self.dataType, WeaveIRStructTypeDecl) or isinstance(self.dataType, WeaveIRUnionTypeDecl))
                 and len(self._in_ops) == 3):
             return self.getFieldDecl().quals
         return self._qualifiers
@@ -2064,6 +2113,32 @@ class WeaveIRbranch(WeaveIRbinaryOps):
 
     def getDestBlock(self):
         return self._dst_block
+
+    def setLeft(self, left):
+        super().setLeft(left)
+        self.__setType()
+
+    def setRight(self, right):
+        super().setRight(right)
+        self.__setType()
+
+    def __setType(self):
+        if self.left is not None and self.right is not None:
+            size = max(self.left.dtype.getSize(self.getFileLocation()), self.right.dtype.getSize(self.getFileLocation()))
+            if self.left.dtype.isInteger and self.right.dtype.isInteger:
+                if size <= 4:
+                    self.dataType = WIRinst.WeaveIRtypes.i32
+                else:
+                    self.dataType = WIRinst.WeaveIRtypes.i64
+            elif self.left.dtype.isFloatingPoint and self.right.dtype.isFloatingPoint:
+                if size <= 4:
+                    self.dataType = WIRinst.WeaveIRtypes.float
+                else:
+                    self.dataType = WIRinst.WeaveIRtypes.double
+        elif self.left is not None:
+            self.dataType = self.left.dtype
+        elif self.right is not None:
+            self.dataType = self.right.dtype
 
     def to_string(self, indent):
         if self.instType == WIRinst.WeaveIRBranchTypes.UNCONDITIONAL:
@@ -2164,6 +2239,9 @@ class WeaveIRcall(WeaveIRinstruction):
     def getInOpTypes(self):
         return [i.dtype for i in self.getInOps()]
 
+    def getInOpQuals(self):
+        return [i.quals for i in self.getInOps()]
+
     def getDefinition(self):
         return self.definition
 
@@ -2245,13 +2323,11 @@ class WeaveIRcast(WeaveIRinstruction):
 
 
 class WeaveIRsend(WeaveIRinstruction):
-    def __init__(self, ctx, ty: WIRinst.WeaveIRsendTypes, ops: list = None,
-                 sendPolicy=WIRinst.WeaveIRsendPolicy.DIRECT):
+    def __init__(self, ctx, ty: WIRinst.WeaveIRsendTypes, ops: list = None):
         super().__init__(ctx)
         self.dataType = WIRinst.WeaveIRtypes.void
         self._in_ops = ops if ops else []
         self.instType = ty
-        self.sendPolicy = sendPolicy
 
     def getAsOperand(self):
         return None
@@ -2259,9 +2335,45 @@ class WeaveIRsend(WeaveIRinstruction):
     def to_string(self, indent):
         operands = ", ".join([f"{i.name}" for i in self.getInOps()])
         return indent_text(
-            f"{self.instType.value} {operands} {self.sendPolicy.name}",
+            f"{self.instType.value} {operands}",
             indent,
         )
+
+    def getLength(self):
+        return self._in_ops[self.getLengthIndex()]
+
+    def getLengthIndex(self):
+        if (self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM_LD_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM_LD):
+            return 2
+        elif (self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDOPS_WCONT or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDOPS_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDOPS_DMLM_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDMOPS or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_WCONT
+        ):
+            return 3
+        errorMsg(f"This instruction ({self}) does not have a operand length parameter.")
+
+    def getLengthRange(self):
+        if (self.instType == WIRinst.WeaveIRsendTypes.SEND_WCONT or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDOPS_WCONT or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDOPS_WRET
+        ):
+            return 2, 9
+        elif (self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM_LD_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM_LD or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM or
+                self.instType == WIRinst.WeaveIRsendTypes.SEND_DMLM_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDOPS_DMLM_WRET or
+                self.instType == WIRinst.WeaveIRsendTypes.SENDMOPS
+
+        ):
+            return 1, 8
 
 
 class WeaveIRupdate(WeaveIRinstruction):
