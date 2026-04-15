@@ -1,0 +1,3335 @@
+// #define DEBUG
+#define PRINT
+#define NUM_THREADS 127
+#define vertex_size (16 * 8)
+#define NUM_DRAM_ACCESS 64
+#define DATA_PER_THREAD (NUM_DRAM_ACCESS * 8)
+// #define NUM_DRAM_ACCESS 32
+// #define DATA_PER_THREAD 480
+
+#define TOP_FLAG              0
+#define THREAD_ID             1
+#define TOTAL_W               2
+#define PARANT_NETID          3
+#define NUM_CHILDREN          4
+#define WORKLOAD              5
+#define OUTGOING_WRITE        6
+#define NUM_THREADS_PER_LANE  7
+#define SEND_BUFFER           16
+#define HEAP                  32
+
+#define args_scratch_space (LMBASE + SEND_BUFFER * 8)
+
+thread init_graph_phase1_main_control {
+  unsigned long num_verts;
+  unsigned long num_edges;
+  unsigned long* graph;
+  unsigned long num_lanes;
+
+  /* Initalize Scratchpad*/
+  event init(unsigned long _num_verts, unsigned long _num_edges, unsigned long* _graph, unsigned long _num_lanes){
+    #ifdef PRINT
+    print("Start Initalization");
+    #endif
+
+    unsigned long evwWord = evw_new(NETID, init_graph_phase1_init_scratchpad::init);
+    send_event(evwWord, _num_lanes, NETID, 0, start);
+
+    num_verts = _num_verts;
+    num_edges = _num_edges;
+    graph = _graph;
+    num_lanes = _num_lanes;
+
+    yield;
+  }
+
+  /* Start LB framework */
+  event start(){
+    print("start");
+    unsigned long *local args = args_scratch_space;
+    args[0] = num_verts;
+    args[1] = num_edges;
+    args[2] = graph;
+    args[3] = (num_lanes * NUM_THREADS);
+    args[4] = 0;
+    args[5] = 0;
+    args[6] = -1;
+    unsigned long evwWord = evw_new(NETID, init_graph_phase1_workload_split::start);
+    send_event(evwWord, args, 7, IGNRCONT);
+    yield_terminate;
+  }
+
+  event done(unsigned long _workload_done, double _total_w){
+    print("End Initalization");
+    unsigned long *local scratch = LMBASE;
+    scratch[TOTAL_W] = _total_w;
+    scratch[TOP_FLAG] = 1;
+    yield_terminate;
+  }
+}
+
+thread init_graph_phase1_init_scratchpad {
+  unsigned long cont;
+  unsigned long workload_done;
+  unsigned long workload_total;
+
+  /* Initialize Scratchpad */
+  event init(unsigned long _num_lanes, unsigned long _netid, unsigned long _level){
+    if(_num_lanes == 1){
+      send_event(CCONT, _num_lanes, IGNRCONT);
+      if(_level == 0){
+        cont = CCONT;
+        workload_done = 0;
+        workload_total = _num_lanes;
+        unsigned long *local scratch = LMBASE;
+        scratch[THREAD_ID] = 0;
+        scratch[TOTAL_W] = 0;
+        scratch[PARANT_NETID] = _netid;
+        scratch[NUM_CHILDREN] = _num_lanes;
+        scratch[WORKLOAD] = _num_lanes;
+        scratch[NUM_THREADS_PER_LANE] = NUM_THREADS;
+        yield_terminate;
+      }
+      yield;
+    }
+
+    unsigned long half_num_lanes = _num_lanes >> 1;
+    send_event(CEVNT, half_num_lanes, NETID, 1, done);
+    unsigned long evwWord = evw_new((NETID + half_num_lanes), init);
+    half_num_lanes = _num_lanes - half_num_lanes;
+    send_event(evwWord, half_num_lanes, NETID, 0, done);
+
+    if(_level == 0){
+      cont = CCONT;
+      workload_done = 0;
+      workload_total = _num_lanes;
+      unsigned long *local scratch = LMBASE;
+      scratch[THREAD_ID] = 0;
+      scratch[TOTAL_W] = 0;
+      scratch[PARANT_NETID] = _netid;
+      scratch[NUM_CHILDREN] = _num_lanes;
+      scratch[WORKLOAD] = _num_lanes;
+      scratch[NUM_THREADS_PER_LANE] = NUM_THREADS;
+    }
+
+    yield;
+  }
+
+  event done(unsigned long _workload_done){
+    workload_done = workload_done + _workload_done;
+    if(workload_done == workload_total){
+      send_event(cont, workload_done, IGNRCONT);
+      yield_terminate;
+    }
+  }
+}
+
+thread init_graph_phase1_workload_split {
+  long num_verts;
+  long num_edges;
+  unsigned long* graph;
+  long num_threads;
+  unsigned long start_edges;
+  unsigned long thread_id;
+
+  unsigned long thread_id2;
+  unsigned long *local scratch_val;
+
+  event start(long _num_verts, long _num_edges, unsigned long* _graph, long _num_threads, unsigned long _start_edges, unsigned long _thread_id, long _tid){
+    #ifdef DEBUG
+    print("num_verts = %lu, num_edges = %lu, num_threads = %lu, thread_id = %lu, tid = %ld", _num_verts, _num_edges, _num_threads, _thread_id, _tid);
+    #endif
+
+    if(_num_threads <= 0){
+      print("Error");
+      yield_terminate;
+    }
+
+    // if no work left, update #threads on current lane, then updare next lane
+    if(_num_verts == 0){
+      // print("idle %lu threads, tid = %lu", _num_threads, _thread_id);
+      unsigned long threads_in_lane = (NETID+1) * NUM_THREADS;
+      threads_in_lane = threads_in_lane - _thread_id;
+      /* If idle threads in one lane */
+      if(_num_threads <= threads_in_lane){
+        /* Update Scratchpad */
+        unsigned long *local scratch = LMBASE;
+        unsigned long total_threads  = scratch[NUM_THREADS_PER_LANE];
+        total_threads  = total_threads  - _num_threads;
+        scratch[NUM_THREADS_PER_LANE] = total_threads;
+
+        if(scratch[THREAD_ID] == total_threads){
+          unsigned long evwWord = evw_new(NETID, init_graph_phase1_start_worker::start);
+          unsigned long evwWord2 = evw_new(NETID, done);
+          send_event(evwWord, total_threads, total_threads, evwWord2);
+        }
+        yield_terminate;
+      }
+
+      /* If idle threads cross lanes */
+      unsigned long tmp = _num_threads - threads_in_lane;
+      unsigned long *local args = args_scratch_space;
+      args[0] = _num_verts;
+      args[3] = tmp;
+      tmp = NETID + 1;
+      args[5] = tmp * NUM_THREADS;
+      unsigned long evwWord = evw_new(tmp, start);
+      send_event(evwWord, args, 7, IGNRCONT);
+
+      /* Update Scratchpad */
+      args = LMBASE;
+      evwWord  = args[NUM_THREADS_PER_LANE];
+      evwWord  = evwWord  - threads_in_lane;
+      args[NUM_THREADS_PER_LANE] = evwWord;
+
+
+      if(args[THREAD_ID] == evwWord){
+        tmp = evw_new(NETID, init_graph_phase1_start_worker::start);
+        unsigned long evwWord2 = evw_new(NETID, done);
+        send_event(tmp, evwWord, evwWord, evwWord2);
+      }
+      yield_terminate;
+    }
+
+    if(_num_threads == 1 || (_num_verts == 1 && _num_edges <= 8)){
+      // get thread ID for private scratchpad
+      unsigned long *local args = LMBASE;
+      unsigned long tid;
+      if(_tid == -1){
+        tid = args[THREAD_ID];
+        args[THREAD_ID] = tid + 1;
+      }else{
+        tid = _tid;
+        args[NUM_THREADS_PER_LANE] = args[NUM_THREADS_PER_LANE] - 1;
+      }
+
+      unsigned long *local scratch = LMBASE + HEAP * 8 + tid * DATA_PER_THREAD;
+      scratch[0] = 0; // multi verts in one thread
+      scratch[1] = _num_verts;
+      scratch[2] = _num_edges;
+      scratch[3] = _graph;
+      scratch[4] = _start_edges;
+      scratch[5] = tid;
+      long tmp = evw_new(NETID, done);
+      scratch[6] = tmp;
+
+      tmp = _num_threads - 1;
+      if(tmp > 0){
+        args = args_scratch_space;
+        args[0] = 0;
+        args[3] = tmp;
+        tmp = _thread_id + 1;
+        args[5] = tmp;
+        // args[6] = -1;
+        tmp = tmp / NUM_THREADS;
+        unsigned long evwWord = evw_new(tmp, start);
+        send_event(evwWord, args, 7, IGNRCONT);
+        if(tmp != NETID){
+          args = LMBASE;
+          tmp = args[NUM_THREADS_PER_LANE];
+          tid = args[THREAD_ID];
+          if(tid == tmp){
+            tmp = evw_new(NETID, init_graph_phase1_start_worker::start);
+            unsigned long evwWord2 = evw_new(NETID, done);
+            send_event(tmp, tid, tid, evwWord2);
+          }
+        }
+      }else{
+        args = LMBASE;
+        tmp = args[NUM_THREADS_PER_LANE];
+        tid = args[THREAD_ID];
+        if(tid == tmp){
+          tmp = evw_new(NETID, init_graph_phase1_start_worker::start);
+          unsigned long evwWord2 = evw_new(NETID, done);
+          send_event(tmp, tid, tid, evwWord2);
+        }
+      }
+      
+      yield_terminate;
+    }
+
+    if(_num_verts == 1){ // only one vertex left, split the vertex
+      unsigned long evwWord = evw_new(NETID, init_graph_phase1_one_vertex_workload_split::start);
+      unsigned long tmp = evw_new(NETID, done);
+      send_ops(evwWord, _num_verts, 7, tmp);
+
+      unsigned long *local scratch = LMBASE;
+      tmp = scratch[WORKLOAD];
+      tmp = tmp + 2;
+      scratch[WORKLOAD] = tmp;
+      yield_terminate;
+    }
+
+    // if(_num_verts >= 32 && _num_threads >= 128){
+    //   if(_tid == -1){
+    //     scratch_val = LMBASE;
+    //     thread_id2 = scratch_val[THREAD_ID];
+    //     scratch_val[THREAD_ID] = thread_id2 + 1;
+    //     scratch_val[NUM_THREADS_PER_LANE] = scratch_val[NUM_THREADS_PER_LANE] + 1;
+    //   }else{
+    //     thread_id2 = _tid;
+    //   }
+    //   scratch_val = LMBASE + HEAP * 8 + thread_id2 * DATA_PER_THREAD;
+      
+    //   unsigned long vid = 0;
+    //   scratch_val[0] = _start_edges;
+    //   scratch_val[1] = _start_edges + _num_edges;
+
+    //   unsigned long shift = _num_verts >> 5;
+    //   long tmp = _num_verts - (shift << 5);
+    //   long* v_addr;
+
+    //   shift = shift + 1;
+
+    //   if(tmp == 0){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return1);
+    //   scratch_val[2] = vid;
+    //   if(tmp == 1){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return2);
+    //   scratch_val[4] = vid;
+    //   if(tmp == 2){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return3);
+    //   scratch_val[6] = vid;
+    //   if(tmp == 3){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return4);
+    //   scratch_val[8] = vid;
+    //   if(tmp == 4){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return5);
+    //   scratch_val[10] = vid;
+    //   if(tmp == 5){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return6);
+    //   scratch_val[12] = vid;
+    //   if(tmp == 6){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return7);
+    //   scratch_val[14] = vid;
+    //   if(tmp == 7){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return8);
+    //   scratch_val[16] = vid;
+    //   if(tmp == 8){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return9);
+    //   scratch_val[18] = vid;
+    //   if(tmp == 9){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return10);
+    //   scratch_val[20] = vid;
+    //   if(tmp == 10){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return11);
+    //   scratch_val[22] = vid;
+    //   if(tmp == 11){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return12);
+    //   scratch_val[24] = vid;
+    //   if(tmp == 12){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return13);
+    //   scratch_val[26] = vid;
+    //   if(tmp == 13){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return14);
+    //   scratch_val[28] = vid;
+    //   if(tmp == 14){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return15);
+    //   scratch_val[30] = vid;
+    //   if(tmp == 15){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return16);
+    //   scratch_val[32] = vid;
+    //   if(tmp == 16){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return17);
+    //   scratch_val[34] = vid;
+    //   if(tmp == 17){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return18);
+    //   scratch_val[36] = vid;
+    //   if(tmp == 18){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return19);
+    //   scratch_val[38] = vid;
+    //   if(tmp == 19){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return20);
+    //   scratch_val[40] = vid;
+    //   if(tmp == 20){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return21);
+    //   scratch_val[42] = vid;
+    //   if(tmp == 21){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return22);
+    //   scratch_val[44] = vid;
+    //   if(tmp == 22){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return23);
+    //   scratch_val[46] = vid;
+    //   if(tmp == 23){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return24);
+    //   scratch_val[48] = vid;
+    //   if(tmp == 24){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return25);
+    //   scratch_val[50] = vid;
+    //   if(tmp == 25){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return26);
+    //   scratch_val[52] = vid;
+    //   if(tmp == 26){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return27);
+    //   scratch_val[54] = vid;
+    //   if(tmp == 27){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return28);
+    //   scratch_val[56] = vid;
+    //   if(tmp == 28){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return29);
+    //   scratch_val[58] = vid;
+    //   if(tmp == 29){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return30);
+    //   scratch_val[60] = vid;
+    //   if(tmp == 30){
+    //     shift = shift - 1;
+    //   }
+    //   vid = vid + shift;
+    //   v_addr = _graph + (vid * vertex_size);
+    //   send_dram_read(v_addr, 8, v32_return31);
+    //   scratch_val[62] = vid;
+    //   if(tmp == 31){
+    //     shift = shift - 1;
+    //   }
+
+    //   num_verts = _num_verts;
+    //   num_edges = _num_edges;
+    //   graph = _graph;
+    //   num_threads = _num_threads;
+    //   start_edges = 31;
+    //   thread_id = _thread_id;
+    //   yield;
+    // }
+
+    if(_num_verts >= 8 && _num_threads >= 8){
+      unsigned long vid;
+      if(_tid == -1){
+        scratch_val = LMBASE;
+        vid = scratch_val[THREAD_ID];
+        scratch_val[THREAD_ID] = vid + 1;
+        scratch_val[NUM_THREADS_PER_LANE] = scratch_val[NUM_THREADS_PER_LANE] + 1;
+      }else{
+        vid = _tid;
+      }
+      scratch_val = LMBASE + HEAP * 8 + vid * DATA_PER_THREAD;
+      thread_id2 = vid;
+      vid = 0;
+      scratch_val[0] = vid;
+      scratch_val[1] = _start_edges;
+
+      scratch_val[16] = _num_verts;
+      scratch_val[17] = _start_edges + _num_edges;
+
+      unsigned long shift = _num_verts >> 3;
+      unsigned long tmp = _num_verts - (shift << 3);
+      long* v_addr = _graph;
+
+      if(tmp == 0){
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 1){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 2){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 3){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 4){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 5){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 6){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+
+      if(tmp == 7){
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return0);
+        scratch_val[2] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return1);
+        scratch_val[4] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return2);
+        scratch_val[6] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return3);
+        scratch_val[8] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return4);
+        scratch_val[10] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return5);
+        scratch_val[12] = vid;
+        vid = vid + shift + 1;
+        v_addr = _graph + (vid * vertex_size);
+        send_dram_read(v_addr, 8, v_return6);
+        scratch_val[14] = vid;
+      }
+      
+      num_verts = _num_verts;
+      num_edges = _num_edges;
+      graph = _graph;
+      num_threads = _num_threads;
+      start_edges = 7;
+      thread_id = _thread_id;
+      yield;
+
+    }
+    
+    unsigned long vid = (_num_verts + 1) >> 1;
+    // unsigned long vid = (_num_verts + 1) * ((_num_threads + 1) >> 1) / _num_threads;
+    long* v_addr = _graph + (vid * vertex_size);
+    send_dram_read(v_addr, 8, v_return);
+
+    num_verts = _num_verts;
+    num_edges = _num_edges;
+    graph = _graph;
+    num_threads = _num_threads;
+    start_edges = _start_edges;
+    thread_id = _thread_id;
+    thread_id2 = _tid;
+    yield;
+  }
+
+  #define v32_return(num)                                                        \
+  event v32_return##num(unsigned long *_neigh_ptr, unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _comm, double _tot, double _in, double* _weight_ptr, long * _addr){       \
+    start_edges = start_edges - 1; \
+    scratch_val[(num*2+1)] = _edges_before; \
+    if(start_edges > 0){ \
+      yield;\
+    } \
+    /* 1st partition */ \
+    unsigned long *local args = args_scratch_space; \
+    unsigned long current_edges = scratch_val[3] - scratch_val[0]; \
+    unsigned long curent_verts = scratch_val[2]; \
+    unsigned long tmp = num_edges + num_verts * 8; \
+    unsigned long first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 31){ \
+      first_num_threads = num_threads - 31; \
+    } \
+    tmp = scratch_val[0]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = thread_id2; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 8, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 2nd partition */ \
+    current_edges = scratch_val[5] - scratch_val[3]; \
+    curent_verts = scratch_val[4] - scratch_val[2]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 30){ \
+      first_num_threads = num_threads - 30; \
+    } \
+    tmp = scratch_val[3]; \
+     \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 3nd partition */ \
+    current_edges = scratch_val[7] - scratch_val[5]; \
+    curent_verts = scratch_val[6] - scratch_val[4]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 29){ \
+      first_num_threads = num_threads - 29; \
+    } \
+    tmp = scratch_val[5]; \
+   \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 4st partition */ \
+    current_edges = scratch_val[9] - scratch_val[7]; \
+    curent_verts = scratch_val[8] - scratch_val[6]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 28){ \
+      first_num_threads = num_threads - 28; \
+    } \
+    tmp = scratch_val[7]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 5st partition */ \
+    current_edges = scratch_val[11] - scratch_val[9]; \
+    curent_verts = scratch_val[10] - scratch_val[8]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 27){ \
+      first_num_threads = num_threads - 27; \
+    } \
+    tmp = scratch_val[9]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 6st partition */ \
+    current_edges = scratch_val[13] - scratch_val[11]; \
+    curent_verts = scratch_val[12] - scratch_val[10]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 26){ \
+      first_num_threads = num_threads - 26; \
+    } \
+    tmp = scratch_val[11]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 7st partition */ \
+    current_edges = scratch_val[15] - scratch_val[13]; \
+    curent_verts = scratch_val[14] - scratch_val[12]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 25){ \
+      first_num_threads = num_threads - 25; \
+    } \
+    tmp = scratch_val[13]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 8st partition */ \
+    current_edges = scratch_val[17] - scratch_val[15]; \
+    curent_verts = scratch_val[16] - scratch_val[14]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 24){ \
+      first_num_threads = num_threads - 24; \
+    } \
+    tmp = scratch_val[15]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 9st partition */ \
+    current_edges = scratch_val[19] - scratch_val[17]; \
+    curent_verts = scratch_val[18] - scratch_val[16]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 23){ \
+      first_num_threads = num_threads - 23; \
+    } \
+    tmp = scratch_val[17]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 10st partition */ \
+    current_edges = scratch_val[21] - scratch_val[19]; \
+    curent_verts = scratch_val[20] - scratch_val[18]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 22){ \
+      first_num_threads = num_threads - 22; \
+    } \
+    tmp = scratch_val[19]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 11st partition */ \
+    current_edges = scratch_val[23] - scratch_val[21]; \
+    curent_verts = scratch_val[22] - scratch_val[20]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 21){ \
+      first_num_threads = num_threads - 21; \
+    } \
+    tmp = scratch_val[21]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 12st partition */ \
+    current_edges = scratch_val[25] - scratch_val[23]; \
+    curent_verts = scratch_val[24] - scratch_val[22]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 20){ \
+      first_num_threads = num_threads - 20; \
+    } \
+    tmp = scratch_val[23]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 13st partition */ \
+    current_edges = scratch_val[27] - scratch_val[25]; \
+    curent_verts = scratch_val[26] - scratch_val[24]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 19){ \
+      first_num_threads = num_threads - 19; \
+    } \
+    tmp = scratch_val[25]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 14st partition */ \
+    current_edges = scratch_val[29] - scratch_val[27]; \
+    curent_verts = scratch_val[28] - scratch_val[26]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 18){ \
+      first_num_threads = num_threads - 18; \
+    } \
+    tmp = scratch_val[27]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 15st partition */ \
+    current_edges = scratch_val[31] - scratch_val[29]; \
+    curent_verts = scratch_val[30] - scratch_val[28]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 17){ \
+      first_num_threads = num_threads - 17; \
+    } \
+    tmp = scratch_val[29]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 16st partition */ \
+    current_edges = scratch_val[33] - scratch_val[31]; \
+    curent_verts = scratch_val[32] - scratch_val[30]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 16){ \
+      first_num_threads = num_threads - 16; \
+    } \
+    tmp = scratch_val[31]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 17st partition */ \
+    current_edges = scratch_val[35] - scratch_val[33]; \
+    curent_verts = scratch_val[34] - scratch_val[32]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 15){ \
+      first_num_threads = num_threads - 15; \
+    } \
+    tmp = scratch_val[33]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 18st partition */ \
+    current_edges = scratch_val[37] - scratch_val[35]; \
+    curent_verts = scratch_val[36] - scratch_val[34]; \
+    tmp = num_edges + num_verts * 8; \
+    first_num_threads = current_edges + (curent_verts * 8); \
+    first_num_threads = first_num_threads * num_threads / tmp; \
+    if(first_num_threads == 0 && num_threads > 0){ \
+      first_num_threads = 1; \
+    } \
+    if((num_threads - first_num_threads) < 14){ \
+      first_num_threads = num_threads - 14; \
+    } \
+    tmp = scratch_val[35]; \
+    args[0] = curent_verts; \
+    args[1] = current_edges; \
+    args[2] = graph; \
+    args[3] = first_num_threads; \
+    args[4] = tmp; \
+    args[5] = thread_id; \
+    args[6] = -1; \
+    tmp = thread_id / NUM_THREADS; \
+    start_edges = evw_new(tmp, start); \
+    send_event(start_edges, args, 7, IGNRCONT); \
+    thread_id = thread_id + first_num_threads; \
+    num_verts = num_verts - curent_verts; \
+    num_edges = num_edges - current_edges; \
+    num_threads = num_threads - first_num_threads; \
+    graph = graph + (curent_verts * vertex_size); \
+ \
+    /* 19st partition */\
+    current_edges = scratch_val[39] - scratch_val[37];\
+    curent_verts = scratch_val[38] - scratch_val[36];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 13){\
+      first_num_threads = num_threads - 13;\
+    }\
+    tmp = scratch_val[37];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 20st partition */\
+    current_edges = scratch_val[41] - scratch_val[39];\
+    curent_verts = scratch_val[40] - scratch_val[38];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 12){\
+      first_num_threads = num_threads - 12;\
+    }\
+    tmp = scratch_val[39];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 21st partition */\
+    current_edges = scratch_val[43] - scratch_val[41];\
+    curent_verts = scratch_val[42] - scratch_val[40];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 11){\
+      first_num_threads = num_threads - 11;\
+    }\
+    tmp = scratch_val[41];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 22st partition */\
+    current_edges = scratch_val[45] - scratch_val[43];\
+    curent_verts = scratch_val[44] - scratch_val[42];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 10){\
+      first_num_threads = num_threads - 10;\
+    }\
+    tmp = scratch_val[43];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 23st partition */\
+    current_edges = scratch_val[47] - scratch_val[45];\
+    curent_verts = scratch_val[46] - scratch_val[44];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 9){\
+      first_num_threads = num_threads - 9;\
+    }\
+    tmp = scratch_val[45];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 24st partition */\
+    current_edges = scratch_val[49] - scratch_val[47];\
+    curent_verts = scratch_val[48] - scratch_val[46];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 8){\
+      first_num_threads = num_threads - 8;\
+    }\
+    tmp = scratch_val[47];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 25st partition */\
+    current_edges = scratch_val[51] - scratch_val[49];\
+    curent_verts = scratch_val[50] - scratch_val[48];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 7){\
+      first_num_threads = num_threads - 7;\
+    }\
+    tmp = scratch_val[49];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 26st partition */\
+    current_edges = scratch_val[53] - scratch_val[51];\
+    curent_verts = scratch_val[52] - scratch_val[50];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 6){\
+      first_num_threads = num_threads - 6;\
+    }\
+    tmp = scratch_val[51];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 27st partition */\
+    current_edges = scratch_val[55] - scratch_val[53];\
+    curent_verts = scratch_val[54] - scratch_val[52];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 5){\
+      first_num_threads = num_threads - 5;\
+    }\
+    tmp = scratch_val[53];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 28st partition */\
+    current_edges = scratch_val[57] - scratch_val[55];\
+    curent_verts = scratch_val[56] - scratch_val[54];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 4){\
+      first_num_threads = num_threads - 4;\
+    }\
+    tmp = scratch_val[55];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 29st partition */\
+    current_edges = scratch_val[59] - scratch_val[57];\
+    curent_verts = scratch_val[58] - scratch_val[56];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 3){\
+      first_num_threads = num_threads - 3;\
+    }\
+    tmp = scratch_val[57];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 30st partition */\
+    current_edges = scratch_val[61] - scratch_val[59];\
+    curent_verts = scratch_val[60] - scratch_val[58];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 2){\
+      first_num_threads = num_threads - 2;\
+    }\
+    tmp = scratch_val[59];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 31st partition */\
+    current_edges = scratch_val[63] - scratch_val[61];\
+    curent_verts = scratch_val[62] - scratch_val[60];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 1){\
+      first_num_threads = num_threads - 1;\
+    }\
+    tmp = scratch_val[61];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 32st partition */\
+    tmp = scratch_val[63];\
+    args[0] = num_verts;\
+    args[1] = num_edges;\
+    args[2] = graph;\
+    args[3] = num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    yield_terminate;\
+  }
+
+  // v32_return(1)
+  // v32_return(2)
+  // v32_return(3)
+  // v32_return(4)
+  // v32_return(5)
+  // v32_return(6)
+  // v32_return(7)
+  // v32_return(8)
+  // v32_return(9)
+  // v32_return(10)
+  // v32_return(11)
+  // v32_return(12)
+  // v32_return(13)
+  // v32_return(14)
+  // v32_return(15)
+  // v32_return(16)
+  // v32_return(17)
+  // v32_return(18)
+  // v32_return(19)
+  // v32_return(20)
+  // v32_return(21)
+  // v32_return(22)
+  // v32_return(23)
+  // v32_return(24)
+  // v32_return(25)
+  // v32_return(26)
+  // v32_return(27)
+  // v32_return(28)
+  // v32_return(29)
+  // v32_return(30)
+  // v32_return(31) 
+
+
+  event v_return(unsigned long *_neigh_ptr, unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _comm, double _tot, double _in, double* _weight_ptr, long * _addr){
+    unsigned long vid = (num_verts + 1) >> 1;
+    unsigned long workload = num_edges + num_verts * 8;
+    unsigned long first_workload = _edges_before - start_edges + vid * 8;
+    unsigned long first_num_threads = first_workload * num_threads / workload;
+
+    if(first_num_threads == 0){
+      first_num_threads = 1;
+    }
+    if(first_num_threads >= num_threads){
+      first_num_threads = num_threads - 1;
+    }
+
+    first_workload = _edges_before - start_edges;
+
+    unsigned long *local args = args_scratch_space;
+    args[0] = vid;
+    args[1] = first_workload;
+    args[2] = graph;
+    args[3] = first_num_threads;
+    args[4] = start_edges;
+    args[5] = thread_id;
+    args[6] = thread_id2;
+    vid = evw_new(NETID, start);
+    send_event(vid, args, 7, IGNRCONT);
+
+    vid = (num_verts + 1) >> 1;
+    args[0] = (num_verts - vid);
+    args[1] = (num_edges - first_workload);
+    args[2] = _addr;
+    args[3] = (num_threads - first_num_threads);
+    args[4] = _edges_before;
+    workload = thread_id + first_num_threads;
+    args[5] = workload;
+    workload = workload / NUM_THREADS;
+    args[6] = -1;
+    vid = evw_new(workload, start);
+    send_event(vid, args, 7, IGNRCONT);
+    yield_terminate;
+  }
+
+
+#define v_return(num)                                                        \
+  event v_return##num(unsigned long *_neigh_ptr, unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _comm, double _tot, double _in, double* _weight_ptr, long * _addr){       \
+    start_edges = start_edges - 1;\
+    scratch_val[(num*2+3)] = _edges_before;\
+    if(start_edges > 0){\
+      yield;\
+    }\
+\
+    /* 1st partition */\
+    unsigned long *local args = args_scratch_space;\
+    unsigned long current_edges = scratch_val[3] - scratch_val[1];\
+    unsigned long curent_verts = scratch_val[2] - scratch_val[0];\
+    unsigned long tmp = num_edges + num_verts * 8;\
+    unsigned long first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 7){\
+      first_num_threads = num_threads - 7;\
+    }\
+    tmp = scratch_val[1];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = thread_id2;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 8, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 2nd partition */\
+    current_edges = scratch_val[5] - scratch_val[3];\
+    curent_verts = scratch_val[4] - scratch_val[2];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 6){\
+      first_num_threads = num_threads - 6;\
+    }\
+    tmp = scratch_val[3];\
+    \
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 3nd partition */\
+    current_edges = scratch_val[7] - scratch_val[5];\
+    curent_verts = scratch_val[6] - scratch_val[4];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 5){\
+      first_num_threads = num_threads - 5;\
+    }\
+    tmp = scratch_val[5];\
+  \
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 4st partition */\
+    current_edges = scratch_val[9] - scratch_val[7];\
+    curent_verts = scratch_val[8] - scratch_val[6];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 4){\
+      first_num_threads = num_threads - 4;\
+    }\
+    tmp = scratch_val[7];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 5st partition */\
+    current_edges = scratch_val[11] - scratch_val[9];\
+    curent_verts = scratch_val[10] - scratch_val[8];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 3){\
+      first_num_threads = num_threads - 3;\
+    }\
+    tmp = scratch_val[9];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 6st partition */\
+    current_edges = scratch_val[13] - scratch_val[11];\
+    curent_verts = scratch_val[12] - scratch_val[10];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 2){\
+      first_num_threads = num_threads - 2;\
+    }\
+    tmp = scratch_val[11];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 7st partition */\
+    current_edges = scratch_val[15] - scratch_val[13];\
+    curent_verts = scratch_val[14] - scratch_val[12];\
+    tmp = num_edges + num_verts * 8;\
+    first_num_threads = current_edges + (curent_verts * 8);\
+    first_num_threads = first_num_threads * num_threads / tmp;\
+    if(first_num_threads == 0 && num_threads > 0){\
+      first_num_threads = 1;\
+    }\
+    if((num_threads - first_num_threads) < 1){\
+      first_num_threads = num_threads - 1;\
+    }\
+    tmp = scratch_val[13];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = first_num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    thread_id = thread_id + first_num_threads;\
+    num_verts = num_verts - curent_verts;\
+    num_edges = num_edges - current_edges;\
+    num_threads = num_threads - first_num_threads;\
+    graph = graph + (curent_verts * vertex_size);\
+\
+    /* 8st partition */\
+    current_edges = scratch_val[17] - scratch_val[15];\
+    curent_verts = scratch_val[16] - scratch_val[14];\
+    tmp = scratch_val[15];\
+    args[0] = curent_verts;\
+    args[1] = current_edges;\
+    args[2] = graph;\
+    args[3] = num_threads;\
+    args[4] = tmp;\
+    args[5] = thread_id;\
+    args[6] = -1;\
+    tmp = thread_id / NUM_THREADS;\
+    start_edges = evw_new(tmp, start);\
+    send_event(start_edges, args, 7, IGNRCONT);\
+    yield_terminate;\
+  }
+
+  v_return(0)
+  v_return(1)
+  v_return(2)
+  v_return(3)
+  v_return(4)
+  v_return(5)
+  v_return(6)
+
+  event done(unsigned long _num_threads_done, double _total_w){
+    unsigned long *local scratch = LMBASE;
+    unsigned long tmp = scratch[WORKLOAD];
+    tmp = tmp - _num_threads_done;
+    scratch[WORKLOAD] = tmp;
+
+    double *local scratch_double = LMBASE;
+    double total_w = scratch_double[TOTAL_W];
+    total_w = total_w + _total_w;
+    scratch_double[TOTAL_W] = total_w;
+
+    if(tmp == 0){
+      tmp = scratch[PARANT_NETID];
+      unsigned long evwWord = evw_new(tmp, done);
+      if(NETID == 0){
+        evwWord = evw_new(tmp, init_graph_phase1_main_control::done);
+      }
+      tmp = scratch[NUM_CHILDREN];
+      send_event(evwWord, tmp, total_w, IGNRCONT);
+    }
+    yield_terminate;
+  }
+
+  event write_done(){
+    unsigned long *local scratch = LMBASE;
+    unsigned long tmp = scratch[WORKLOAD];
+    tmp = tmp - 1;
+    scratch[WORKLOAD] = tmp;
+
+    if(tmp == 0){
+      double *local scratch_double = LMBASE;
+      double total_w = scratch_double[TOTAL_W];
+      tmp = scratch[PARANT_NETID];
+      unsigned long evwWord = evw_new(tmp, done);
+      if(NETID == 0){
+        evwWord = evw_new(tmp, init_graph_phase1_main_control::done);
+      }
+      tmp = scratch[NUM_CHILDREN];
+      send_event(evwWord, tmp, total_w, IGNRCONT);
+    }
+    yield_terminate;
+  }
+}
+
+
+thread init_graph_phase1_one_vertex_workload_split{
+  unsigned long workload_done;
+  unsigned long workload_total;
+  double in;
+  double tot;
+  unsigned long* graph;
+  unsigned long vid;
+  unsigned long num_edges;
+  unsigned long num_threads;
+  unsigned long thread_id;
+  long thread_id2;
+
+  event start(unsigned long _num_verts, unsigned long _num_edges, unsigned long* _graph, unsigned long _num_threads, unsigned long _start_edges, unsigned long _thread_id, long _tid){
+    #ifdef DEBUG
+    print("num_verts = %lu, num_edges = %lu, num_threads = %lu, thread_id = %lu, tid = %ld", _num_verts, _num_edges, _num_threads, _thread_id, _tid);
+    #endif
+    
+    if(_num_verts != 1){
+      print("Error, num_verts != 1");
+    }
+
+    send_dram_read(_graph, 8, read_vertex);
+    num_edges = _num_edges;
+    num_threads = _num_threads;
+    thread_id = _thread_id;
+    workload_done = 0;
+    workload_total = _num_threads;
+    in = 0.0;
+    tot = 0.0;
+    graph = _graph;
+    thread_id2 = _tid;
+
+    yield;
+  }
+
+  event read_vertex(unsigned long *_neigh_ptr, unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _comm, double _tot, double _in, unsigned long *_weight_ptr, long * _addr){    
+    unsigned long tmp = ((num_edges + 15) >> 4) << 3;
+    unsigned long *local args = args_scratch_space;
+    args[0] = 1;
+    args[1] = tmp;
+    args[2] = graph;
+    tmp = (num_threads + 1) >> 1;
+    args[3] = tmp;
+    args[4] = thread_id;
+    args[5] = _neigh_ptr;
+    args[6] = _weight_ptr;
+    args[7] = _vid;
+    args[8] = thread_id2;
+    unsigned long evwWord = evw_new(NETID, start2);
+    send_event(evwWord, args, 9, done_merge);
+
+
+    tmp =  ((num_edges + 15) >> 4) << 3;
+    args[5] =  _neigh_ptr + (tmp << 3);
+    args[6] =  _weight_ptr + (tmp << 3);
+    args[1] = (num_edges - tmp);
+    tmp = (num_threads + 1)>> 1;
+    args[3] = (num_threads - tmp);
+    tmp = thread_id + tmp;
+    args[4] = tmp;
+    args[8] = -1;
+    tmp = tmp / NUM_THREADS;
+    evwWord = evw_new(tmp, start2);
+    send_event(evwWord, args, 9, done_merge);
+
+    vid = _vid;
+  }
+
+  event done_merge(unsigned long _workload_done, double _in, double _tot){
+    workload_done = workload_done + _workload_done;
+    in = in + _in;
+    tot = tot + _tot;
+    if(workload_done == workload_total){
+      unsigned long *local args = args_scratch_space;
+      args[0] = vid;
+      args[1] = tot;
+      args[2] = in;
+
+      long *addr = graph + 32;
+      send_dram_write(addr, args, 3, write_done);
+      addr = graph + 72;
+      send_dram_write(addr, tot, write_done1);
+      thread_id2 = 2;
+    }
+  }
+
+  event write_done(){
+    unsigned long *local scratch = LMBASE;
+    unsigned long tmp = scratch[WORKLOAD];
+    tmp = tmp - 1;
+    scratch[WORKLOAD] = tmp;
+
+    double *local scratch_double = LMBASE;
+    double total_w = scratch_double[TOTAL_W];
+    total_w = total_w + tot;
+    scratch_double[TOTAL_W] = total_w;
+
+    if(tmp == 0){
+      tmp = scratch[PARANT_NETID];
+      unsigned long evwWord = evw_new(tmp, init_graph_phase1_workload_split::done);
+      if(NETID == 0){
+        evwWord = evw_new(tmp, init_graph_phase1_main_control::done);
+      }
+      tmp = scratch[NUM_CHILDREN];
+      send_event(evwWord, tmp, total_w, IGNRCONT);
+    }
+    thread_id2 = thread_id2 - 1;
+    if(thread_id2 == 0){
+      yield_terminate;
+    }
+  }
+
+  event write_done1(){
+    unsigned long *local scratch = LMBASE;
+    unsigned long tmp = scratch[WORKLOAD];
+    tmp = tmp - 1;
+    scratch[WORKLOAD] = tmp;
+
+    double *local scratch_double = LMBASE;
+    double total_w = scratch_double[TOTAL_W];
+
+    if(tmp == 0){
+      tmp = scratch[PARANT_NETID];
+      unsigned long evwWord = evw_new(tmp, init_graph_phase1_workload_split::done);
+      if(NETID == 0){
+        evwWord = evw_new(tmp, init_graph_phase1_main_control::done);
+      }
+      tmp = scratch[NUM_CHILDREN];
+      send_event(evwWord, tmp, total_w, IGNRCONT);
+    }
+    thread_id2 = thread_id2 - 1;
+    if(thread_id2 == 0){
+      yield_terminate;
+    }
+  }
+
+  event start2(long _num_verts, long _num_edges, unsigned long* _graph, long _num_threads, unsigned long _thread_id, unsigned long *_neigh_ptr, unsigned long *_weight_ptr, unsigned long _vid, long _tid){
+    #ifdef DEBUG
+    print("num_verts = %lu, num_edges = %lu, num_threads = %lu, thread_id = %lu, tid = %ld", _num_verts, _num_edges, _num_threads, _thread_id, _tid);
+    #endif
+
+    // if no work left, update #threads on current lane, then updare next lane
+    if(_num_verts == 0){
+      // print("idle %lu threads, tid = %lu", _num_threads, _thread_id);
+      unsigned long threads_in_lane = (NETID+1) * NUM_THREADS;
+      threads_in_lane = threads_in_lane - _thread_id;
+      /* If idle threads in one lane */
+      if(_num_threads <= threads_in_lane){
+        /* Update Scratchpad */
+        unsigned long *local scratch = LMBASE;
+        unsigned long total_threads  = scratch[NUM_THREADS_PER_LANE];
+        total_threads  = total_threads  - _num_threads;
+        scratch[NUM_THREADS_PER_LANE] = total_threads;
+        if(scratch[THREAD_ID] == total_threads){
+          unsigned long evwWord = evw_new(NETID, init_graph_phase1_start_worker::start);
+          send_event(evwWord, total_threads, total_threads, CCONT);
+        }
+        yield_terminate;
+      }
+
+      /* If idle threads cross lanes */
+      unsigned long tmp = _num_threads - threads_in_lane;
+      unsigned long *local args = args_scratch_space;
+      args[0] = _num_verts;
+      args[3] = tmp;
+      tmp = NETID + 1;
+      args[4] = tmp * NUM_THREADS;
+      unsigned long evwWord = evw_new(tmp, start2);
+      send_event(evwWord, args, 9, CCONT);
+
+       /* Update Scratchpad */
+      args = LMBASE;
+      evwWord  = args[NUM_THREADS_PER_LANE];
+      evwWord  = evwWord  - threads_in_lane;
+      args[NUM_THREADS_PER_LANE] = evwWord;
+
+      if(args[THREAD_ID] == evwWord){
+        tmp = evw_new(NETID, init_graph_phase1_start_worker::start);
+        send_event(tmp, evwWord, evwWord, CCONT);
+      }
+
+      yield_terminate;
+    }
+
+    if(_num_threads == 1 || _num_edges <= 8){
+      // get thread ID for private scratchpad
+      unsigned long *local args = LMBASE;
+      long tid = _tid;
+      if(tid == -1){
+        tid = args[THREAD_ID];
+        args[THREAD_ID] = tid + 1;
+      }else{
+        args[NUM_THREADS_PER_LANE] = args[NUM_THREADS_PER_LANE] - 1;
+      }
+
+      unsigned long *local scratch = LMBASE + HEAP * 8 + tid * DATA_PER_THREAD;
+      scratch[0] = 1; // split one vertex in one thread
+      scratch[1] = _num_verts;
+      scratch[2] = _num_edges;
+      scratch[3] = _graph;
+      scratch[4] = tid;
+      scratch[5] = _neigh_ptr;
+      scratch[6] = _weight_ptr;
+      scratch[7] = _vid;
+      scratch[8] = CCONT;
+
+      unsigned long tmp = _num_threads - 1;
+      if(tmp > 0){
+        unsigned long evwWord = 0;
+        send_event(CCONT, tmp, evwWord , evwWord , IGNRCONT);
+        args = args_scratch_space;
+        args[0] = 0;
+        args[3] = tmp;
+        tmp = _thread_id + 1;
+        args[4] = tmp;
+        // args[6] = -1;
+        tmp = tmp / NUM_THREADS;
+        evwWord = evw_new(tmp, start2);
+        send_event(evwWord, args, 9, IGNRCONT);
+        if(tmp != NETID){
+          args = LMBASE;
+          tmp = args[NUM_THREADS_PER_LANE];
+          tid = args[THREAD_ID];
+          if(tid == tmp){
+            tmp = evw_new(NETID, init_graph_phase1_start_worker::start);
+            send_event(tmp, tid, tid, CCONT);
+          }
+        }
+      }else{
+        args = LMBASE;
+        tmp = args[NUM_THREADS_PER_LANE];
+        tid = args[THREAD_ID];
+        if(tid == tmp){
+          tmp = evw_new(NETID, init_graph_phase1_start_worker::start);
+          send_event(tmp, tid, tid, CCONT);
+        }
+      }
+      
+      yield_terminate;
+    }
+
+    unsigned long tmp = ((_num_edges + 15) >> 4) << 3;
+    unsigned long *local args = args_scratch_space;
+    args[0] = _num_verts;
+    args[1] = tmp;
+    args[2] = _graph;
+    tmp = (_num_threads + 1) >> 1;
+    args[3] = tmp;
+    args[4] = _thread_id;
+    args[5] = _neigh_ptr;
+    args[6] = _weight_ptr;
+    args[7] = _vid;
+    args[8] = _tid;
+    unsigned long evwWord = evw_new(NETID, start2);
+    send_event(evwWord, args, 9, CCONT);
+
+    tmp = ((_num_edges + 15) >> 4) << 3;
+    args[5] =  _neigh_ptr + (tmp << 3);
+    args[6] =  _weight_ptr + (tmp << 3);
+    args[1] = (_num_edges - tmp);
+    tmp = (_num_threads + 1) >> 1;
+    args[3] = (_num_threads - tmp);
+    tmp = _thread_id + tmp;
+    args[4] = tmp;
+    args[8] = -1;
+    tmp = tmp / NUM_THREADS;
+    evwWord = evw_new(tmp, start2);
+    send_event(evwWord, args, 9, CCONT);
+    yield_terminate;
+  }
+}
+
+
+thread init_graph_phase1_start_worker{
+  event start(unsigned long _num_threads){
+    unsigned long tid = 0;
+    unsigned long new_workload = 0;
+    while(tid < _num_threads){
+      unsigned long *local scratch = LMBASE + HEAP * 8 + tid * DATA_PER_THREAD;
+      if(scratch[0] == 0){ // multi verts in one thread
+        // if(NETID == 374){
+          // print("scratch = 0x%lx, tid = %lu", scratch, tid);
+          // print("num_verts = %lu, num_edges = %lu, graph = 0x%lx, start_edges = %lu, thread_id = %lu", scratch[1], scratch[2], scratch[3], scratch[4], scratch[5]);
+        // }
+        unsigned long tmp = scratch[6];
+        unsigned long evwWord = evw_new(NETID, init_graph_phase1_worker::start);
+        send_event(evwWord, scratch + 8, 5, tmp);
+
+        // send_event(tmp, 1, 0, IGNRCONT);
+        new_workload = new_workload + 1;
+      }else{
+        // if(NETID == 374){
+          // print("tid = %lu, num_verts = %lu, num_edges = %lu, vid = %lu, thread_id = %lu", tid, scratch[1], scratch[2], scratch[7], scratch[4]);
+        // }
+        unsigned long tmp = scratch[8];
+        unsigned long evwWord = evw_new(NETID, init_graph_phase1_one_vertex_worker::start);
+        send_event(evwWord, scratch + 8, 7, tmp);
+
+        // send_event(tmp, 1, 0, 0, IGNRCONT);
+      }
+      tid = tid + 1;
+    }
+    unsigned long *local scratch = LMBASE;
+    tid = scratch[WORKLOAD];
+    tid = tid + new_workload;
+    tid = tid - 1;
+    scratch[WORKLOAD] = tid;
+
+    double *local scratch_double = LMBASE;
+    double total_w = scratch_double[TOTAL_W];
+
+    if(tid == 0){
+      unsigned long tmp = scratch[PARANT_NETID];
+      unsigned long evwWord = evw_new(tmp, init_graph_phase1_workload_split::done);
+      if(NETID == 0){
+        evwWord = evw_new(tmp, init_graph_phase1_main_control::done);
+      }
+      tmp = scratch[NUM_CHILDREN];
+      send_event(evwWord, tmp, total_w, IGNRCONT);
+    }
+    // print("Partition tree generated");
+    yield_terminate;
+  }
+}
+
+#define GRAPH 8
+#define TOT   9
+#define IN    10
+#define VID   11
+#define DEG   12
+#define NEIGH_PTR   13
+#define WEIGHT_PTR   14
+
+thread init_graph_phase1_worker{
+  unsigned long num_verts;
+  unsigned long num_verts_done;
+  unsigned long cont;
+  unsigned long * graph;
+  unsigned long *local scratch0;
+  unsigned long *local scratch1;
+  unsigned long *local scratch2;
+  unsigned long *local scratch3;
+  double total_w;
+
+  event start(long _num_verts, unsigned long _num_edges, unsigned long* _graph, unsigned long _start_edges, unsigned long _thread_id){
+    #ifdef DEBUG
+    print("num_verts = %lu, num_edges = %lu, thread_id = %lu, worload = %lu", _num_verts, _num_edges,  _thread_id, _num_verts * 8 + _num_edges);
+    #endif
+
+    scratch0 = LMBASE;
+    scratch0[WORKLOAD] = scratch0[WORKLOAD] + (_num_verts * 2);
+
+    if(_num_verts <= 2 || ((_num_edges / _num_verts) >= 32)){
+      send_dram_read(_graph, 8, read_v);
+      num_verts = _num_verts;
+      num_verts_done = _thread_id;
+      graph = _graph;
+      cont = CCONT;
+      total_w = 0;
+      yield;
+    }
+
+    num_verts = _num_verts;
+    graph = _graph;
+    send_dram_read(graph, 8, read_v0);
+    if(_num_verts > 1){
+      graph = graph + vertex_size;
+      send_dram_read(graph, 8, read_v1);
+    }
+    if(_num_verts > 2){
+      graph = graph + vertex_size;
+      send_dram_read(graph, 8, read_v2);
+    }
+    if(_num_verts > 3){
+      graph = graph + vertex_size;
+      send_dram_read(graph, 8, read_v3);
+    }
+
+    scratch0 = LMBASE + HEAP * 8 + _thread_id * DATA_PER_THREAD;
+    scratch1 = scratch0 + 120;
+    scratch2 = scratch1 + 120;
+    scratch3 = scratch2 + 120;
+
+    scratch0[GRAPH] = 0;
+    scratch1[GRAPH] = 0;
+    scratch2[GRAPH] = 0;
+    scratch3[GRAPH] = 0;
+
+    graph = _graph;
+    scratch0[GRAPH] = graph;
+    double tmp = 0;
+    double *local scratch_double = scratch0;
+    scratch_double[TOT] = tmp;
+    scratch_double[IN] = tmp;
+
+    num_verts = num_verts - 1;
+    
+
+    if(_num_verts > 1){
+      graph = graph + vertex_size;
+      // send_dram_read(graph, 8, read_v1);
+      scratch1[GRAPH] = graph;
+      scratch_double = scratch1;
+      scratch_double[TOT] = tmp;
+      scratch_double[IN] = tmp;
+      num_verts = num_verts - 1;
+    }
+
+    if(_num_verts > 2){
+      graph = graph + vertex_size;
+      // send_dram_read(graph, 8, read_v2);
+      scratch2[GRAPH] = graph;
+      scratch_double = scratch2;
+      scratch_double[TOT] = tmp;
+      scratch_double[IN] = tmp;
+      num_verts = num_verts - 1;
+    }
+
+    if(_num_verts > 3){
+      graph = graph + vertex_size;
+      // send_dram_read(graph, 8, read_v3);
+      scratch3[GRAPH] = graph;
+      scratch_double = scratch3;
+      scratch_double[TOT] = tmp;
+      scratch_double[IN] = tmp;
+      num_verts = num_verts - 1;
+    }
+
+    total_w = 0;
+    cont = CCONT;
+    num_verts_done = _num_verts;
+  }
+
+  event read_v(unsigned long *_neigh_ptr, unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _comm, double _tot, double _in, double* _weight_ptr, long * _addr){
+    if(_deg == 0){
+      unsigned long *local args = args_scratch_space;
+      args[0] = _vid;
+      args[1] = 0;
+      args[2] = 0;
+      unsigned long evwWord = evw_new(NETID, init_graph_phase1_workload_split::write_done);
+      send_dram_write(graph + 32, args, 3, evwWord);
+      send_dram_write(graph + 72, 0, evwWord);
+      num_verts = num_verts - 1;
+      if(num_verts == 0){
+        send_event(cont, 1, total_w, IGNRCONT);
+        yield_terminate;
+      }
+      graph = graph + vertex_size;
+      send_dram_read(graph, 8, read_v);
+      yield;
+    }
+    
+    unsigned long evwWord = evw_new(NETID, init_graph_phase1_one_vertex_worker2::start);
+    // get thread ID for private scratchpad
+    unsigned long *local args = args_scratch_space;
+    args[0] = 1;
+    args[1] = _deg;
+    args[2] = graph;
+    args[3] = num_verts_done;
+    args[4] = _neigh_ptr;
+    args[5] = _weight_ptr;
+    args[6] = _vid;
+    send_event(evwWord, args, 7, one_vertex_done);
+    scratch0 = _vid;
+    scratch1 = _weight_ptr;
+  }
+
+  event one_vertex_done(unsigned long _workload_done, double _in, double _tot){
+    unsigned long *local args = args_scratch_space;
+    unsigned long tmp = scratch0;
+    args[0] = tmp;
+    args[1] = _tot;
+    args[2] = _in;
+    unsigned long evwWord = evw_new(NETID, init_graph_phase1_workload_split::write_done);
+    send_dram_write(graph + 32, args, 3, evwWord);
+    send_dram_write(graph + 72, _tot, evwWord);
+    total_w = total_w + _tot;
+    num_verts = num_verts - 1;
+    if(num_verts == 0){
+      send_event(cont, 1, total_w, IGNRCONT);
+      yield_terminate;
+    }
+    graph = graph + vertex_size;
+    send_dram_read(graph, 8, read_v);
+    yield;
+  }
+
+  event next_vertex(){
+    if(num_verts == 0){
+      send_event(cont, 1, total_w, IGNRCONT);
+      yield_terminate;
+    }
+    graph = graph + vertex_size;
+    send_dram_read(graph, 8, read_v);
+    yield;
+  }
+
+#define read_v_template(num)                                                        \
+  event read_v##num(unsigned long *_neigh_ptr, unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _comm, double _tot, double _in, double* _weight_ptr, long * _addr){       \
+    unsigned long *local scratch = scratch##num;\
+    if(_deg == 0){\
+      double tmp = 0;\
+      unsigned long *local args = args_scratch_space;\
+      args[0] = _vid;\
+      args[1] = tmp;\
+      args[2] = tmp;\
+      unsigned long * graph1 = scratch[GRAPH];\
+      unsigned long evwWord = evw_new(NETID, init_graph_phase1_workload_split::write_done);\
+      send_dram_write(graph1 + 32, args, 3, evwWord);\
+      send_dram_write(graph1 + 72, tmp, evwWord); \
+      evwWord = evw_update_event(CEVNT, next_vertex##num);\
+      send_event(evwWord, num_verts, num_verts, IGNRCONT);\
+      yield;\
+    }\
+    send_dram_read(_neigh_ptr, 8, read_neighbor##num);\
+    scratch[DEG] = _deg;\
+    scratch[NEIGH_PTR] = _neigh_ptr + 64;\
+    scratch[WEIGHT_PTR] = _weight_ptr;\
+    scratch[VID] = _vid;\
+  }
+
+read_v_template(0)
+read_v_template(1)
+read_v_template(2)
+read_v_template(3)
+
+
+#define read_neighbor_template(num) \
+  event read_neighbor##num(unsigned long op0, unsigned long op1, unsigned long op2, unsigned long op3, unsigned long op4, unsigned long op5, unsigned long op6, unsigned long op7){ \
+    unsigned long *local scratch = scratch##num;\
+    long * weight_ptr_start = scratch[WEIGHT_PTR];\
+    send_dram_read(weight_ptr_start, 8, read_weight##num);\
+    weight_ptr_start = weight_ptr_start + 64;\
+    scratch[WEIGHT_PTR] = weight_ptr_start;\
+    copyOperands(op0, scratch, 8);\
+  }
+
+read_neighbor_template(0)
+read_neighbor_template(1)
+read_neighbor_template(2)
+read_neighbor_template(3)
+
+#define read_weight_template(num) \
+  event read_weight##num(double op0, double op1, double op2, double op3, double op4, double op5, double op6, double op7){\
+    unsigned long *local scratch = scratch##num;\
+    double *local scratch_double = scratch##num;\
+    unsigned long deg = scratch[DEG];\
+    unsigned long * neigh_ptr = scratch[NEIGH_PTR];\
+    if(deg > 8){\
+      send_dram_read(neigh_ptr, 8, read_neighbor##num);\
+      neigh_ptr = neigh_ptr + 64;\
+      scratch[NEIGH_PTR] = neigh_ptr;\
+    }else{\
+      unsigned long evwWord = evw_update_event(CEVNT, next_vertex##num);\
+      send_event(evwWord, num_verts, num_verts, IGNRCONT);\
+    }\
+    double tot = scratch_double[TOT];\
+    double in = scratch_double[IN];\
+    unsigned long vid = scratch[VID];\
+    if(deg > 0){\
+      tot = tot + op0;\
+      if(vid == scratch[0]){\
+        in = in + op0;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op1;\
+      if(vid == scratch[1]){\
+        in = in + op1;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op2;\
+      if(vid == scratch[2]){\
+        in = in + op2;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op3;\
+      if(vid == scratch[3]){\
+        in = in + op3;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op4;\
+      if(vid == scratch[4]){\
+        in = in + op4;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op5;\
+      if(vid == scratch[5]){\
+        in = in + op5;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op6;\
+      if(vid == scratch[6]){\
+        in = in + op6;\
+      }\
+      deg = deg - 1;\
+    }\
+    if(deg > 0){\
+      tot = tot + op7;\
+      if(vid == scratch[7]){\
+        in = in + op7;\
+      }\
+      deg = deg - 1;\
+    }\
+    scratch[DEG] = deg;\
+    scratch_double[TOT] = tot;\
+    scratch_double[IN] = in;\
+\
+    if(deg == 0){\
+      total_w = total_w + tot;\
+      unsigned long *local args = args_scratch_space;\
+      args[0] = vid;\
+      args[1] = tot;\
+      args[2] = in;\
+      unsigned long * graph1 = scratch[GRAPH] + 32;\
+      deg = evw_new(NETID, init_graph_phase1_workload_split::write_done);\
+      send_dram_write(graph1, args, 3, deg);\
+      args[0] = tot;\
+      graph1 = graph1 + 40;\
+      send_dram_write(graph1, args, 1, deg); \
+      deg = 0;\
+      yield;\
+    }\
+  }
+
+read_weight_template(0)
+read_weight_template(1)
+read_weight_template(2)
+read_weight_template(3)
+
+#define next_vertex_template(num) \
+  event next_vertex##num(){\
+    unsigned long *local scratch = scratch##num;\
+    unsigned long *local scratch_double = scratch##num;\
+    num_verts_done = num_verts_done - 1;\
+    if(num_verts_done == 0){\
+      send_event(cont, 1, total_w, IGNRCONT);\
+      yield_terminate;\
+    }\
+\
+    if(num_verts > 0){\
+      graph = graph + vertex_size;\
+      send_dram_read(graph, 8, read_v##num);\
+      num_verts = num_verts - 1;\
+      scratch[GRAPH] = graph;\
+      double tmp = 0;\
+      scratch_double[TOT] = tmp;\
+      scratch_double[IN] = tmp;\
+      yield;\
+    }\
+  }
+
+next_vertex_template(0)
+next_vertex_template(1)
+next_vertex_template(2)
+next_vertex_template(3)
+}
+
+thread init_graph_phase1_one_vertex_worker{
+  unsigned long vid;
+  unsigned long outgoing;
+  double in;
+  double tot;
+  unsigned long * graph;
+  unsigned long cont;
+  unsigned long *local scratch;
+  unsigned long deg;
+  unsigned long * neigh_ptr;
+  unsigned long * neigh_ptr_start;
+  double * weight_ptr_start;
+
+  event start(unsigned long _num_verts, unsigned long _num_edges, unsigned long* _graph, unsigned long _thread_id, unsigned long *_neigh_ptr, double *_weight_ptr, unsigned long _vid){
+    #ifdef DEBUG
+    print("num_verts = %lu, num_edges = %lu, thread_id = %lu, vid = %lu, workload = %lu", _num_verts, _num_edges, _thread_id, _vid, _num_edges);
+    #endif
+    if(_num_verts != 1){
+      print("Error, num_verts  = %lu not 1", _num_verts);
+    }
+
+    graph = _graph;
+    cont = CCONT;
+    scratch = LMBASE + HEAP * 8 + _thread_id * DATA_PER_THREAD;
+    deg = _num_edges;
+    neigh_ptr = _neigh_ptr;
+    weight_ptr_start = _weight_ptr;
+    neigh_ptr_start = neigh_ptr;
+
+    if(deg <= 8){
+      send_dram_read(neigh_ptr, 8, read_neighbor_low_deg);
+      neigh_ptr = neigh_ptr + 64;
+      vid = _vid;
+      in = 0.0;
+      tot = 0.0;
+      yield;
+    }
+
+    long idx = 0;
+    outgoing = 0;
+    while((idx < deg) && (idx < NUM_DRAM_ACCESS)){
+      send_dram_read(neigh_ptr, 8, read_neighbor);
+      neigh_ptr = neigh_ptr + 64;
+      idx = idx + 8;
+      outgoing = outgoing + 1;
+    }
+    
+    vid = _vid;
+    in = 0.0;
+    tot = 0.0;
+  }
+
+  event read_neighbor_low_deg(unsigned long op0, unsigned long op1, unsigned long op2, unsigned long op3, unsigned long op4, unsigned long op5, unsigned long op6, unsigned long op7){
+    copyOperands(op0, scratch, 8);
+    send_dram_read(weight_ptr_start, 8, read_weight_low_deg);
+    weight_ptr_start = weight_ptr_start + 64;
+  }
+
+  event read_weight_low_deg(double op0, double op1, double op2, double op3, double op4, double op5, double op6, double op7){
+    if(deg > 8){
+      send_dram_read(neigh_ptr, 8, read_neighbor_low_deg);
+      neigh_ptr = neigh_ptr + 64;
+    }
+    if(deg > 0){
+      tot = tot + op0;
+      if(vid == scratch[0]){
+        in = in + op0;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op1;
+      if(vid == scratch[1]){
+        in = in + op1;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op2;
+      if(vid == scratch[2]){
+        in = in + op2;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op3;
+      if(vid == scratch[3]){
+        in = in + op3;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op4;
+      if(vid == scratch[4]){
+        in = in + op4;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op5;
+      if(vid == scratch[5]){
+        in = in + op5;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op6;
+      if(vid == scratch[6]){
+        in = in + op6;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op7;
+      if(vid == scratch[7]){
+        in = in + op7;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+  }
+
+  event read_neighbor(unsigned long op0, unsigned long op1, unsigned long op2, unsigned long op3, unsigned long op4, unsigned long op5, unsigned long op6, unsigned long op7, unsigned long * _addr){
+    unsigned long offset = _addr - neigh_ptr_start;
+    unsigned long tmp = offset & (NUM_DRAM_ACCESS * 8 - 1);
+    copyOperands(op0, scratch + tmp, 8);
+    send_dram_read(weight_ptr_start + offset, 8, read_weight);
+  }
+
+  event read_weight(double op0, double op1, double op2, double op3, double op4, double op5, double op6, double op7, unsigned long * _addr){
+    unsigned long offset = _addr - weight_ptr_start;
+    unsigned long idx = offset >> 3;
+    idx = idx + NUM_DRAM_ACCESS;
+    if(idx < deg){ //read next 8 words
+      idx = idx << 3;
+      unsigned long *addr = neigh_ptr_start + idx;
+      send_dram_read(addr, 8, read_neighbor);
+      idx = idx & (NUM_DRAM_ACCESS * 8 - 1);
+      unsigned long *local scratch_tmp = scratch + idx;
+
+      tot = tot + op0;
+      if(vid == scratch_tmp[0]){
+        in = in + op0;
+      }
+      tot = tot + op1;
+      if(vid == scratch_tmp[1]){
+        in = in + op1;
+      }
+      tot = tot + op2;
+      if(vid == scratch_tmp[2]){
+        in = in + op2;
+      }
+      tot = tot + op3;
+      if(vid == scratch_tmp[3]){
+        in = in + op3;
+      }
+      tot = tot + op4;
+      if(vid == scratch_tmp[4]){
+        in = in + op4;
+      }
+      tot = tot + op5;
+      if(vid == scratch_tmp[5]){
+        in = in + op5;
+      }
+      tot = tot + op6;
+      if(vid == scratch_tmp[6]){
+        in = in + op6;
+      }
+      tot = tot + op7;
+      if(vid == scratch_tmp[7]){
+        in = in + op7;
+      }
+      yield;
+    }
+
+    outgoing = outgoing - 1;
+
+    idx = idx - NUM_DRAM_ACCESS;
+    offset = offset & (NUM_DRAM_ACCESS * 8 - 1);
+    unsigned long *local scratch_tmp = scratch + offset;
+    if(deg > idx){
+      tot = tot + op0;
+      if(vid == scratch_tmp[0]){
+        in = in + op0;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op1;
+      if(vid == scratch_tmp[1]){
+        in = in + op1;
+      }
+      idx = idx + 1;
+    }
+
+    if(deg > idx){
+      tot = tot + op2;
+      if(vid == scratch_tmp[2]){
+        in = in + op2;
+      }
+      idx = idx + 1;
+    }
+
+    if(deg > idx){
+      tot = tot + op3;
+      if(vid == scratch_tmp[3]){
+        in = in + op3;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op4;
+      if(vid == scratch_tmp[4]){
+        in = in + op4;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op5;
+      if(vid == scratch_tmp[5]){
+        in = in + op5;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op6;
+      if(vid == scratch_tmp[6]){
+        in = in + op6;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op7;
+      if(vid == scratch_tmp[7]){
+        in = in + op7;
+      }
+      idx = idx + 1;
+    }
+ 
+    if(outgoing == 0){
+      send_event(cont, 1, in, tot, IGNRCONT);
+      yield_terminate;
+    }
+  }
+}
+
+
+thread init_graph_phase1_one_vertex_worker2{
+  unsigned long vid;
+  unsigned long outgoing;
+  double in;
+  double tot;
+  unsigned long * graph;
+  unsigned long cont;
+  unsigned long *local scratch;
+
+  unsigned long deg;
+  unsigned long * neigh_ptr;
+  unsigned long * neigh_ptr_start;
+  double * weight_ptr_start;
+
+  event start(unsigned long _num_verts, unsigned long _num_edges, unsigned long* _graph, unsigned long _thread_id, unsigned long *_neigh_ptr, double *_weight_ptr, unsigned long _vid){
+    // #ifdef DEBUG
+    // print("num_verts = %lu, num_edges = %lu, graph = 0x%lx, thread_id = %lu, vid = %lu", _num_verts, _num_edges, _graph, _thread_id, _vid);
+    // #endif
+    if(_num_verts != 1){
+      print("Error, num_verts  = %lu not 1", _num_verts);
+    }
+
+    graph = _graph;
+    cont = CCONT;
+    scratch = LMBASE + HEAP * 8 + _thread_id * DATA_PER_THREAD;
+    deg = _num_edges;
+    neigh_ptr = _neigh_ptr;
+    weight_ptr_start = _weight_ptr;
+    neigh_ptr_start = neigh_ptr;
+
+    if(deg <= 8){
+      send_dram_read(neigh_ptr, 8, read_neighbor_low_deg);
+      neigh_ptr = neigh_ptr + 64;
+      vid = _vid;
+      in = 0.0;
+      tot = 0.0;
+      yield;
+    }
+
+    long idx = 0;
+    outgoing = 0;
+    while((idx < deg) && (idx < NUM_DRAM_ACCESS)){
+      send_dram_read(neigh_ptr, 8, read_neighbor);
+      neigh_ptr = neigh_ptr + 64;
+      idx = idx + 8;
+      outgoing = outgoing + 1;
+    }
+    
+    vid = _vid;
+    in = 0.0;
+    tot = 0.0;
+  }
+
+  event read_neighbor_low_deg(unsigned long op0, unsigned long op1, unsigned long op2, unsigned long op3, unsigned long op4, unsigned long op5, unsigned long op6, unsigned long op7){
+    copyOperands(op0, scratch, 8);
+    send_dram_read(weight_ptr_start, 8, read_weight_low_deg);
+    weight_ptr_start = weight_ptr_start + 64;
+  }
+
+  event read_weight_low_deg(double op0, double op1, double op2, double op3, double op4, double op5, double op6, double op7){
+    if(deg > 8){
+      send_dram_read(neigh_ptr, 8, read_neighbor_low_deg);
+      neigh_ptr = neigh_ptr + 64;
+    }
+    if(deg > 0){
+      tot = tot + op0;
+      if(vid == scratch[0]){
+        in = in + op0;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op1;
+      if(vid == scratch[1]){
+        in = in + op1;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op2;
+      if(vid == scratch[2]){
+        in = in + op2;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op3;
+      if(vid == scratch[3]){
+        in = in + op3;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op4;
+      if(vid == scratch[4]){
+        in = in + op4;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op5;
+      if(vid == scratch[5]){
+        in = in + op5;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op6;
+      if(vid == scratch[6]){
+        in = in + op6;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+
+    if(deg > 0){
+      tot = tot + op7;
+      if(vid == scratch[7]){
+        in = in + op7;
+      }
+      deg = deg - 1;
+      if(deg == 0){
+        send_event(cont, 1, in, tot, IGNRCONT);
+        yield_terminate;
+      }
+    }
+  }
+
+  event read_neighbor(unsigned long op0, unsigned long op1, unsigned long op2, unsigned long op3, unsigned long op4, unsigned long op5, unsigned long op6, unsigned long op7, unsigned long * _addr){
+    unsigned long offset = _addr - neigh_ptr_start;
+    unsigned long tmp = offset & (NUM_DRAM_ACCESS * 8 - 1);
+    copyOperands(op0, scratch + tmp, 8);
+    send_dram_read(weight_ptr_start + offset, 8, read_weight);
+  }
+
+  event read_weight(double op0, double op1, double op2, double op3, double op4, double op5, double op6, double op7, unsigned long * _addr){
+    unsigned long offset = _addr - weight_ptr_start;
+    unsigned long idx = offset >> 3;
+    idx = idx + NUM_DRAM_ACCESS;
+    if(idx < deg){ //read next 8 words
+      idx = idx << 3;
+      unsigned long *addr = neigh_ptr_start + idx;
+      send_dram_read(addr, 8, read_neighbor);
+      idx = idx & (NUM_DRAM_ACCESS * 8 - 1);
+      unsigned long *local scratch_tmp = scratch + idx;
+
+      // weight_ptr_start = weight_ptr_start + NUM_DRAM_ACCESS * 8;
+      // neigh_ptr_start = neigh_ptr_start + NUM_DRAM_ACCESS * 8;
+
+      tot = tot + op0;
+      if(vid == scratch_tmp[0]){
+        in = in + op0;
+      }
+      tot = tot + op1;
+      if(vid == scratch_tmp[1]){
+        in = in + op1;
+      }
+      tot = tot + op2;
+      if(vid == scratch_tmp[2]){
+        in = in + op2;
+      }
+      tot = tot + op3;
+      if(vid == scratch_tmp[3]){
+        in = in + op3;
+      }
+      tot = tot + op4;
+      if(vid == scratch_tmp[4]){
+        in = in + op4;
+      }
+      tot = tot + op5;
+      if(vid == scratch_tmp[5]){
+        in = in + op5;
+      }
+      tot = tot + op6;
+      if(vid == scratch_tmp[6]){
+        in = in + op6;
+      }
+      tot = tot + op7;
+      if(vid == scratch_tmp[7]){
+        in = in + op7;
+      }
+      yield;
+    }
+
+    outgoing = outgoing - 1;
+
+    idx = idx - NUM_DRAM_ACCESS;
+    offset = offset & (NUM_DRAM_ACCESS * 8 - 1);
+    unsigned long *local scratch_tmp = scratch + offset;
+    if(deg > idx){
+      tot = tot + op0;
+      if(vid == scratch_tmp[0]){
+        in = in + op0;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op1;
+      if(vid == scratch_tmp[1]){
+        in = in + op1;
+      }
+      idx = idx + 1;
+    }
+
+    if(deg > idx){
+      tot = tot + op2;
+      if(vid == scratch_tmp[2]){
+        in = in + op2;
+      }
+      idx = idx + 1;
+    }
+
+    if(deg > idx){
+      tot = tot + op3;
+      if(vid == scratch_tmp[3]){
+        in = in + op3;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op4;
+      if(vid == scratch_tmp[4]){
+        in = in + op4;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op5;
+      if(vid == scratch_tmp[5]){
+        in = in + op5;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op6;
+      if(vid == scratch_tmp[6]){
+        in = in + op6;
+      }
+      idx = idx + 1;
+    }
+    if(deg > idx){
+      tot = tot + op7;
+      if(vid == scratch_tmp[7]){
+        in = in + op7;
+      }
+      idx = idx + 1;
+    }
+ 
+    if(outgoing == 0){
+      send_event(cont, 1, in, tot, IGNRCONT);
+      yield_terminate;
+    }
+  }
+}
+    
+    
