@@ -2823,7 +2823,7 @@ class hashValue(WeaveIntrinsicFunc):
         hash(long data)
         Return => long hashValue
         The issue with that intrinsic is that the return register is also an input.
-        It breaks comon C syntax and is not recommended to use.
+        It breaks common C syntax and is not recommended to use.
     """
 
     def __init__(self, ctx):

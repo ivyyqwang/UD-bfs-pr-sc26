@@ -174,8 +174,8 @@ class WeaveIRtypes(Enum):
             self.isFloatingPoint and otherType.isFloatingPoint and self == otherType or
 
             # disallow to use a signed integer to be used as a pointer.
-            self.isPointer and otherType.isInteger and not otherSigned or
-            otherType.isPointer and self.isInteger and not thisSigned
+            self.isPointer and otherType.isInteger or
+            otherType.isPointer and self.isInteger
         )
 
 
