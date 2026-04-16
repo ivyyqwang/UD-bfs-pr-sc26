@@ -1,0 +1,7 @@
+#ifndef __filter_launchers_H__
+#define __filter_launchers_H__
+
+
+extern event filter_launcher__start();
+
+#endif

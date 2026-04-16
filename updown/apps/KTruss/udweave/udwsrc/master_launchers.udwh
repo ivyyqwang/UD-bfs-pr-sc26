@@ -1,0 +1,14 @@
+#ifndef __launchers_H__
+#define __launchers_H__
+
+
+extern event master_launcher__init();
+extern event master_launcher__intersection_init_done();
+extern event master_launcher__launch_v();
+extern event master_launcher__vertex_term();
+extern event master_launcher__all_launched();
+extern event master_launcher__reduce_num_int();
+extern event master_launcher__send_to_master_thread1();
+extern event master_launcher__send_to_master_thread2();
+extern event master_launcher__relaunch();
+#endif

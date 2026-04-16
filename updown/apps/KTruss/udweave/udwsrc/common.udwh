@@ -1,0 +1,67 @@
+#ifndef __COMMON_H__
+#define __COMMON_H__
+
+// This is all metadata information
+#define LMSIZE 65536
+#define WORD_SIZE 8
+#define WORD_SIZE_LOG2 3
+
+#define NUM_MASTERS 4
+#define NUM_INTERSECTORS 60  // Max is 60
+#define NUM_FILTERS 64
+#define NUM_CACHE 180
+
+// Each threads in the same lane shared the following scratchpad
+#define CACHE_LEN_OFFSET 0
+// #define TOP_TC_OUTPUT 1
+#define G_V 2
+#define CACHE_THREADS 3
+// send buffer 4 - 13 (9 words)
+#define SENDBUFFER 4
+#define G_V_LOCAL 13
+#define MASTER_BUFFER_START 14
+#define NEXT_MASTER_SIZE 15
+// #define NUM_WRITE 16
+#define NUM_V_THREAD 17
+// #define NUM_INT 18
+#define NUM_LANES_TOTAL 19
+#define MASTER_LAUNCHER 20
+#define INT_LAUNCHER 24
+// master, intersection launcher offsets
+#define MAINCONT 0
+#define ALL_LAUNCHED 1 // 0: start; 1:finish initlization; 
+#define DRAM_START 2
+#define DRAM_END 3
+
+#define INT_LM_OFFSET_START 28
+#define INT_LM_OFFSET_END 29
+#define ITERA 30
+#define CONTROL_OFFSET 31
+#define INT_LM_OFFSET 190
+
+/* private scratchpad for each thread */
+#define THREAD_STATUS 250
+// Each thread's own private scratchpad size: [(THREAD_STATUS << 3) + TID * THREAD_LM_SIZE, (THREAD_STATUS << 3) + (TID+1) * THREAD_LM_SIZE]
+#define THREAD_LM_SIZE  232
+/* 28 - 224*256+28 */
+
+#define CACHE_OFFSET 15920
+#define CACHE_LEN 2048
+#define LOG2_CACHE_LEN 11
+#define CACHE_LEN_1 2047
+
+/* Store the control thread ID */
+#define MASTER_START_OFFSET 65256
+#define THREADID_OFFSET 65264
+#define K_OFFSET 65496
+#define MASTER_THREADID_OFFSET 65504
+#define WORKER_THREADID_OFFSET 65512
+
+
+
+#define MAIN_MASTER_OFFSET 65520
+#define MAIN_TC 0
+#define MAIN_TOP_FLAG 1
+
+
+#endif

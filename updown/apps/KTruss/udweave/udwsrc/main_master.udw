@@ -1,0 +1,628 @@
+// This is all metadata information
+#include "master_launchers.udwh"
+#include "fliter_launchers.udwh"
+#include "intersection_launchers.udwh"
+#include "flag.udwh"
+#include "common.udwh"
+
+// #define DEBUG
+
+// master_buffer_start in LM[MASTER_BUFFER_START]
+// g_v_local in LM[G_V_LOCAL]
+// k in LM[K_OFFSET]
+// iter in LM[ITERA]
+
+// _num_lane_in = num_lanes << 32 + num_lanes_total
+// _num_combine = num_combine << 32 + cache_size
+// _log2_num_control_lane = log2_num_control_lane << 32 + control_level
+
+thread main_master {
+    unsigned long tc_cumulative;
+    unsigned long num_lanes_per_control;
+    unsigned long control_level;
+    unsigned long num_map;
+    unsigned long num_map_done;
+    unsigned long num_vertices;
+    long num_combine;
+    // unsigned long  master_start;
+
+    /* 
+        multi-level broadcast and synchronization 
+        init_tc -> master_launcher::init -> init_done -> start
+        start -> master_launcher::launch_v -> v_launcher_done -> v_all_launched
+        v_all_launched -> master::launcher__all_launched -> int_launcher_done -> int_all_launched
+        int_all_launched -> intersection_launcher::cache_write_finish -> tc_launcher_done
+    
+    */
+
+
+    event init_tc(long _num_lanes_in, long _num_combine, long* g_v_in, long* intersection_start, long intersection_size, long* master_start0, long* master_start1, long master_size, long _log2_num_control_lane){
+        unsigned long* local lmbuff = LMBASE;
+#ifdef DEBUG
+        print("[DEBUG] num_lanes_in %lu g_v_in::0x%lx intersection_start:0x%lx intersection_size %lu log2_num_control_lane %lu", num_lanes_in, g_v_in, intersection_start, intersection_size, log2_num_control_lane);
+        print("[DEBUG] num_combine %lu num_lanes_total %lu master_size %lu _control_level %lu", _num_combine, num_lanes_total, master_size, _control_level);
+#endif
+        /* start */
+        unsigned long num_masters = lmbuff[ITERA];
+        unsigned long log2_num_control_lane = _log2_num_control_lane >> 32;
+        control_level = log2_num_control_lane << 32;
+        control_level = _log2_num_control_lane - control_level;
+        if(num_masters == 0){
+            if(control_level == 0){
+                print("K-Truss Start");
+
+                lmbuff = LMBASE + (MAIN_MASTER_OFFSET);
+                lmbuff[MAIN_TC] = control_level;
+                lmbuff[MAIN_TOP_FLAG] = control_level;
+            }
+        }
+
+        long num_lanes_in = _num_lanes_in >> 32;
+        num_combine = _num_combine >> 32;
+        
+
+        if(control_level == 0){
+            long itera = lmbuff[ITERA];
+            print("[Itera %lu] start", itera);
+
+            itera = num_lanes_in << 32;
+            itera = _num_lanes_in - itera;
+
+            long cache_len = num_combine << 32;
+            cache_len = _num_combine - cache_len;
+
+            print("num_lanes_in = %lu, num_lanes_total = %lu, num_combine = %lu, cache_len = %lu", num_lanes_in, itera, num_combine, cache_len);
+            print("log2_num_control_lane = %lu, control_level = %lu, g_v_in = 0x%lx, intersection_start = 0x%lx, intersection_size = %lu",log2_num_control_lane, control_level, g_v_in, intersection_start,intersection_size);
+            print("master_start0 = 0x%lx, master_start1 = 0x%lx, master_size = %lu",master_start0, master_start1, master_size);
+        }
+
+        num_masters = 1 << log2_num_control_lane;
+        num_lanes_per_control = num_lanes_in - 1;
+        num_lanes_per_control = (num_lanes_per_control >> log2_num_control_lane) + 1;
+
+
+        if(num_lanes_per_control == 1){
+            num_map = num_lanes_in;
+            lmbuff = LMBASE + (SENDBUFFER << 3);
+            lmbuff[0] = master_start0;
+            lmbuff[1] = master_size;
+            lmbuff[2] = intersection_start;
+            lmbuff[3] = intersection_size;
+            lmbuff[4] = g_v_in;
+            long tmp = num_lanes_in << 32;
+            tmp = _num_lanes_in - tmp;
+            lmbuff[5] = tmp;  // num_lanes_total
+            tmp = num_combine << 32;
+            tmp = _num_combine - tmp;
+            lmbuff[6] = tmp; // cache_len
+            lmbuff[7] = num_combine;
+            lmbuff[8] = master_start1;
+            int netid = NETID;
+            long lane_end = netid + num_lanes_in;
+            while(netid < lane_end){
+                unsigned long evword = evw_new(netid, master_launcher__init);
+                send_event(evword, lmbuff, 9, init_done);
+                netid = netid + 1;
+            }
+        }else{
+            num_map = num_masters;
+            lmbuff = LMBASE + (SENDBUFFER << 3);
+            long tmp = num_lanes_in << 32;
+            tmp = _num_lanes_in - tmp; // num_lanes_total
+            tmp = (num_lanes_per_control << 32) + tmp; // num_lanes_in : num_lanes_total
+            lmbuff[0] = tmp;
+            copyOperands(_num_combine, lmbuff + 8, 7);
+            lmbuff[8] = _log2_num_control_lane + 1;
+            long mlane_id = NETID;
+            tmp = num_lanes_per_control * num_masters;
+            tmp = tmp + mlane_id;
+            while(mlane_id < tmp){
+                long evword = evw_new(mlane_id, init_tc);
+                send_event(evword, lmbuff, 9, init_done);
+                mlane_id = mlane_id + num_lanes_per_control;
+            }
+        }
+        tc_cumulative = 0;
+        num_vertices = 0;
+        num_map_done = 0;
+        lmbuff = LMBASE + THREADID_OFFSET;
+        unsigned long index = (control_level << 1);
+        lmbuff[index] = TID;
+        lmbuff[index+1] = CCONT;
+
+        unsigned long tmp = CONTROL_OFFSET << 3;
+        unsigned long lm_offset = control_level * 72;
+        lm_offset = lm_offset + tmp;
+        lmbuff = LMBASE + lm_offset;
+        copyOperands(_num_lanes_in, lmbuff, 8);
+        lmbuff[8] = _log2_num_control_lane;
+        if(num_combine > 1){
+            lmbuff[5] = master_start1;
+            lmbuff[6] = master_start0;
+        }
+        yield;
+    }
+
+    event init_done(long nwid){
+        num_map_done = num_map_done + 1;
+        if(num_map_done == num_map){
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, start);
+                send_event(evword, control_level, v_launcher_done);
+                print("[DEBUG][NWID %lu] <init_done> finsh", NETID);
+            }else{
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1) + 1;
+                unsigned long cont = lmbuff[index];
+                send_event(cont, NETID, IGNRCONT);
+            }
+        }       
+        yield;
+    }
+
+    event send_to_global_master_thread(long op0, long op1, long _control_level){
+        unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+        unsigned long index = _control_level << 1;
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_global_master_thread> index:%ld, CCONT=%lu, control_level=%lu", NETID, index, CCONT, _control_level);
+#endif
+        int tid = lmbuff[index];
+        lmbuff[index + 1] = CCONT;
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_global_master_thread> tid:%ld, CCONT=%lu, control_level=%lu", NETID, tid, CCONT, _control_level);
+#endif
+        unsigned long evword = evw_update_thread(op0, tid);
+        send_event(evword, op1, CCONT);
+        yield_terminate;
+    }
+
+    event start(){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start> start", NETID);
+#endif
+        int net_id = NETID;
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, master_launcher__launch_v);
+#ifdef DEBUG        
+            print("[DEBUG][NWID %lu] <start> num_lanes_per_control == 1, num_map:%lu", NETID, num_map);
+#endif
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, master_launcher__send_to_master_thread1);
+                send_event(next_evword, cont_evword, NETID, v_launcher_done);
+                net_id = net_id + 1;
+            }
+        }else{
+#ifdef DEBUG        
+                print("[DEBUG][NWID %lu] <start> num_lanes_per_control != 1, num_map:%lu", NETID, num_map);
+#endif
+                unsigned long evword = evw_update_event(CEVNT, start);
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, NETID, control_level+1,  v_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+#ifdef DEBUG
+            print("[DEBUG][NWID %lu] <launch_v> end", NETID);
+#endif
+    }
+
+    event v_launcher_done(long num_v){
+        num_map_done = num_map_done + 1;
+        tc_cumulative = 0;
+        num_vertices = num_v + num_vertices;
+        // #ifdef DEBUG
+        // print("[DEBUG][NWID %lu] <map_launcher_done> num_map_done:%lu from niwd %lu", NETID, num_map_done, nwid);
+        // #endif
+        if(num_map_done == num_map){
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, v_all_launched);
+                send_event(evword, control_level, int_launcher_done);
+                print("[DEBUG][NWID %lu] <v_launcher_done> num of vertices = %lu", NETID, num_vertices);
+            }else{
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1);
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, num_vertices, IGNRCONT);
+            }
+        }
+    }
+
+    event v_all_launched(){
+        int net_id = NETID;
+        if(num_vertices == 0){ // no work
+            unsigned long evword = evw_update_event(CEVNT, int_launcher_done);
+            send_event(evword, num_vertices, IGNRCONT);
+            num_map_done = num_map - 1;
+            yield;
+        }
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, master_launcher__all_launched);
+            // int net_id = NETID;
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, master_launcher__send_to_master_thread1);
+                send_event(next_evword, cont_evword, NETID, int_launcher_done);
+                net_id = net_id + 1;
+            }
+        }else{
+                unsigned long evword = evw_update_event(CEVNT, v_all_launched);
+                // int net_id = NETID;
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, net_id, control_level+1,  int_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+        yield;
+    }
+
+    event int_launcher_done(long tc){
+        num_map_done = num_map_done + 1;
+        tc_cumulative = tc_cumulative + tc;
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, int_all_launched);
+                send_event(evword, control_level, tc_launcher_done);
+
+                print("[DEBUG][NWID %lu] <int_launcher_done>", NETID);
+            }
+            else{
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <int_launcher_done tmp> ", NETID);
+                #endif
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1);
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, tc_cumulative, IGNRCONT);
+            }
+        }
+    }
+
+    event int_all_launched(){
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, intersection_launcher__cache_write_finish);
+            int net_id = NETID;
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, intersection_launcher__send_to_worker_thread2);
+                send_event(next_evword, cont_evword, net_id, NETID, tc_launcher_done);
+                net_id = net_id + 1;
+
+            }
+        }else{
+                unsigned long evword = evw_update_event(CEVNT, int_all_launched);
+                int net_id = NETID;
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, control_level, control_level+1,  tc_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+        yield;
+    }
+
+    event tc_launcher_done(long netid){
+        num_map_done = num_map_done + 1;
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                unsigned long evword = evw_update_event(CEVNT, tc_all_launched);
+                unsigned long* local lmbuff = LMBASE;
+                send_event(evword, lmbuff[G_V_LOCAL], cache_launcher_done);
+
+                print("[DEBUG][NWID %lu] <tc_launcher_done>", NETID);
+            }
+            else{
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <tc_launcher_done> ", NETID);
+                #endif
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long index = (control_level << 1);
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, NETID, IGNRCONT);
+            }
+        }
+    }
+
+    event tc_all_launched(unsigned long _gv_local){
+        if(num_lanes_per_control == 1){
+            unsigned long evword = evw_update_event(CEVNT, intersection_launcher__write_back_cache);
+            int net_id = NETID;
+            int net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, intersection_launcher__send_to_worker_thread2);
+                send_event(next_evword, cont_evword,  net_id, NETID, cache_launcher_done);
+                net_id = net_id + 1;
+            }
+            unsigned long* local lmbuff = LMBASE;
+            lmbuff[G_V_LOCAL] =  _gv_local;
+
+        }else{
+                unsigned long evword = evw_update_event(CEVNT, tc_all_launched);
+                int net_id = NETID;
+                int net_id_end = net_id + num_map*num_lanes_per_control;
+                while(net_id < net_id_end){
+                    unsigned long cont_evword = evw_update_netid(evword, net_id);
+                    unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                    send_event(next_evword, cont_evword, _gv_local, control_level+1, cache_launcher_done);
+                    net_id = net_id + num_lanes_per_control;
+                }
+        }
+        yield;
+    }
+
+    event cache_launcher_done(long netid){
+        num_map_done = num_map_done + 1;
+
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                print("TC: %lu",tc_cumulative);
+                unsigned long evword = evw_update_event(CEVNT, cache_all_launched);
+                unsigned long* local lmbuff = LMBASE + K_OFFSET;
+                long k = lmbuff[0];
+                send_event(evword, k, filter_launcher_done);
+                yield;
+            }
+            else{
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <cache_launcher_donee> update_split_v:%lu", NETID, return_value);
+                #endif
+                unsigned long index = (control_level << 1);
+                unsigned long* local lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, NETID, IGNRCONT);
+                yield;
+            }
+        }
+    }
+
+    event cache_all_launched(long k){
+        tc_cumulative = 0;
+        // if(num_vertices == 0){ // no work
+        //     unsigned long evword = evw_update_event(CEVNT, filter_launcher_done);
+        //     send_event(evword, num_vertices, num_vertices, IGNRCONT);
+        //     num_map_done = num_map - 1;
+        //     yield;
+        // }
+        num_vertices = 0;
+        int net_id = NETID;
+        if(num_lanes_per_control == 1){
+            unsigned long tmp = CONTROL_OFFSET << 3;
+            unsigned long* local lmbuff = LMBASE + tmp;
+            tmp = control_level * 72;
+            lmbuff = lmbuff + tmp;
+            tmp = (1 << 32) - 1; // mask
+            long net_id_end = lmbuff[0];
+            net_id_end = net_id_end & tmp; // num_lane_total
+            unsigned long* local temp_lmbuff = LMBASE + (SENDBUFFER * 8);
+            temp_lmbuff[0] = k;
+            tmp = lmbuff[2];    // gv
+            temp_lmbuff[1] = tmp;
+            tmp = lmbuff[5];    // master_start
+            temp_lmbuff[2] = tmp;
+            tmp = lmbuff[6];    // master_start_write
+            temp_lmbuff[3] = tmp;
+            temp_lmbuff[4] = num_combine;
+            temp_lmbuff[5] = 0;
+            tmp = lmbuff[7];    // master_size
+            tmp = tmp * num_combine;
+            temp_lmbuff[7] = tmp;
+            lmbuff = LMBASE;
+            tmp = lmbuff[G_V_LOCAL];
+            temp_lmbuff[6] = tmp;
+
+            if(num_combine > 1){
+                if(net_id_end == 2048) {  // 1 node
+                    temp_lmbuff[5] = 1;
+                }
+            }
+            // net_id = NETID;
+            net_id_end = net_id + num_map;
+            while(net_id < net_id_end){
+                tmp = evw_new(net_id, filter_launcher__start);
+                send_event(tmp, temp_lmbuff, 8, filter_launcher_done);
+                net_id = net_id + 1;
+            }
+        }else{
+            unsigned long evword = evw_update_event(CEVNT, cache_all_launched);
+            // int net_id = NETID;
+            int net_id_end = net_id + num_map*num_lanes_per_control;
+            while(net_id < net_id_end){
+                unsigned long cont_evword = evw_update_netid(evword, net_id);
+                unsigned long next_evword = evw_new(net_id, send_to_global_master_thread);
+                send_event(next_evword, cont_evword, k, control_level+1, filter_launcher_done);
+                net_id = net_id + num_lanes_per_control;
+             }
+        }
+        yield;
+    }
+
+
+    event filter_launcher_done(unsigned long _deleted_edges, unsigned long _updated_edges){
+        num_map_done = num_map_done + 1;
+        tc_cumulative = tc_cumulative + _deleted_edges;
+        num_vertices = num_vertices + _updated_edges;
+        unsigned long* local lmbuff = LMBASE;
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                long itera = lmbuff[ITERA];
+                print("[Itera %lu]: deleted tc %lu, update edges %lu", itera, tc_cumulative, num_vertices);
+                itera = itera + 1;
+                lmbuff[ITERA] = itera;
+                if(tc_cumulative == 0){ // end
+                // if(itera == 1){
+                    lmbuff = LMBASE + MAIN_MASTER_OFFSET;
+                    lmbuff[MAIN_TC] = itera;
+                    lmbuff[MAIN_TOP_FLAG] = 1;
+                    yield_terminate;
+                }
+                // lmbuff = LMBASE + K_OFFSET;
+                // long k = lmbuff[0];
+                // if(k == 1){
+                //     if(itera == 1){ // end in the first iteratio
+                //         lmbuff = LMBASE + MAIN_MASTER_OFFSET;
+                //         lmbuff[MAIN_TC] = itera;
+                //         lmbuff[MAIN_TOP_FLAG] = 1;
+                //         yield_terminate;
+                //     }
+                // }
+                long tmp = CONTROL_OFFSET << 3;
+                unsigned long lm_offset = control_level * 72;
+                lm_offset = lm_offset + tmp;
+                lmbuff = LMBASE + lm_offset;
+                tmp = lmbuff[7]; // master_size
+                lmbuff[7] = num_combine * tmp;
+                tmp = lmbuff[5];
+                unsigned long evword = lmbuff[6];
+                lmbuff[5] = evword;
+                lmbuff[6] = tmp; // exchange LM[5] and LM[6]
+                tmp = (1 << 32) - 1; // mask
+                evword = lmbuff[0];
+                evword = evword & tmp; // num_lane_total
+                if(num_vertices > (2048 * CACHE_LEN * 4)){ // not reduce
+                // if(evword == tmp){ // not reduce
+                    evword = evw_update_event(CEVNT, init_tc);
+                    send_event(evword, lmbuff, 9, init_done);
+                    yield;
+                }
+                if(num_combine > 1){
+                    if(evword == 2048) {  // 1 node, switch to local
+                        lmbuff = LMBASE;
+                        tmp = lmbuff[G_V_LOCAL];
+                        lmbuff = LMBASE + lm_offset;
+                        lmbuff[2] = tmp; // switch gv to gv_local
+                    }
+                }
+                lm_offset = 2048;
+                if(evword > lm_offset){ // reduce machine sizes to 1
+                    tmp = (lm_offset << 32) + lm_offset;
+                    lmbuff[0] = tmp;
+                    tmp = evword / lm_offset; // num_combine
+                    lmbuff[1] = tmp; // num_combine
+                }elif(evword == lm_offset){ // 1 node, reduce cache line
+                    lmbuff[1] = 1;
+                    lmbuff = LMBASE;
+                    tmp = lmbuff[CACHE_LEN_OFFSET] + 1;
+                    tmp = tmp * lm_offset; // total cache length
+                    num_vertices = num_vertices << 2;
+                    while(num_vertices < tmp){ // reduce cache size
+                        tmp = tmp >> 1;
+                    }
+                    tmp = tmp / lm_offset;
+                    if(tmp <= 4){
+                        tmp = 4;
+                        lmbuff[CACHE_LEN_OFFSET] = tmp - 1;
+                        tmp = evword;
+                        if(tmp >= 2048){
+                            lm_offset = 2048;
+                        }elif(tmp >= 1024){
+                            lm_offset = 1024;
+                        }elif(tmp >= 512){
+                            lm_offset = 512;
+                        }elif(tmp >= 256){
+                            lm_offset = 256;
+                        }elif(tmp >= 128){
+                            lm_offset = 128;
+                        }elif(tmp >= 64){
+                            lm_offset = 64;
+                        }elif(tmp >= 32){
+                            lm_offset = 32;
+                        }elif(tmp >= 16){
+                            lm_offset = 16;
+                        }elif(tmp >= 8){
+                            lm_offset = 8;
+                        }elif(tmp >= 4){
+                            lm_offset = 4;
+                        }elif(tmp >= 2){
+                            lm_offset = 2;
+                        }
+                        lmbuff = LMBASE + (CONTROL_OFFSET << 3);
+                        tmp = (lm_offset << 32) + lm_offset;
+                        lmbuff[0] = tmp;
+                        tmp = evword / lm_offset; // num_combine
+                        lmbuff[1] = tmp; // num_combine
+                        print("previous lanes = %lu, next lanes = %lu", evword, lm_offset);
+
+                    }else{
+                        lmbuff[CACHE_LEN_OFFSET] = tmp - 1;
+                    }
+                }else{
+                    if(tmp >= 2048){
+                        lm_offset = 2048;
+                    }elif(tmp >= 1024){
+                        lm_offset = 1024;
+                    }elif(tmp >= 512){
+                        lm_offset = 512;
+                    }elif(tmp >= 256){
+                        lm_offset = 256;
+                    }elif(tmp >= 128){
+                        lm_offset = 128;
+                    }elif(tmp >= 64){
+                        lm_offset = 64;
+                    }elif(tmp >= 32){
+                        lm_offset = 32;
+                    }elif(tmp >= 16){
+                        lm_offset = 16;
+                    }elif(tmp >= 8){
+                        lm_offset = 8;
+                    }elif(tmp >= 4){
+                        lm_offset = 4;
+                    }elif(tmp >= 2){
+                        lm_offset = 2;
+                    }
+                    tmp = (lm_offset << 32) + lm_offset;
+                    lmbuff[0] = tmp;
+                    tmp = evword / lm_offset; // num_combine
+                    lmbuff[1] = tmp; // num_combine
+                }
+                lmbuff = LMBASE;
+                tmp = lmbuff[CACHE_LEN_OFFSET] + 1;
+                print("cache len = %ld", tmp);
+                lmbuff = LMBASE + (CONTROL_OFFSET << 3);
+                lm_offset = lmbuff[1]; // num_combine
+                lm_offset = (lm_offset << 32) + tmp; // num_combine: cache_size
+                lmbuff[1] = lm_offset;
+                evword = evw_update_event(CEVNT, init_tc);
+                send_event(evword, lmbuff, 9, init_done);
+                yield;
+            }
+            else{
+                // if(num_lanes_per_control == 1){
+                //     print("deleted_edges %lu, update_edges %lu", tc_cumulative, num_vertices);
+                // }
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <map_split_launcher_done> update_split_v:%lu", NETID, return_value);
+                #endif
+                unsigned long index = (control_level << 1);
+                lmbuff = LMBASE + THREADID_OFFSET;
+                unsigned long cont = lmbuff[index+1];
+                send_event(cont, tc_cumulative, num_vertices, IGNRCONT);
+                yield_terminate;
+            }
+        }
+    }
+
+
+
+}

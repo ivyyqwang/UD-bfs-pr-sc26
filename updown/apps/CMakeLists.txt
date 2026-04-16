@@ -9,6 +9,7 @@ if (UPDOWNRT_ENABLE_APPS)
     set(UPDOWNSIMRT_APPS_SRC 
         # add py src files here
         tc/udweave/tc_udweave.cpp
+        KTruss/udweave/k_truss_udweave.cpp
         pagerank_udkvmsr/split_and_shuffle.cpp
         pagerank_udkvmsr/pagerankMSRdramalloc.cpp
         pagerank_udkvmsr/pagerank_data_driven/pagerankPullDD.cpp
@@ -34,6 +35,7 @@ if (UPDOWNRT_ENABLE_APPS)
     set(UPDOWNSIMRT_PYTHON_APPS_SRC2BIN
         # add py src files here
         tc/udweave/three_clique_mm_exe.py
+        KTruss/udweave/k_truss_exe.py
         pagerank_udkvmsr/pagerankMSRdramallocEFA.py
         pagerank_udkvmsr/pagerank_data_driven/out/pagerank_pull_dd.py
         network_test/sync_bfs/bfs_udweave_exe.py

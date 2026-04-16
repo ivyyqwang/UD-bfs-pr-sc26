@@ -1,0 +1,188 @@
+// This is all metadata information
+#include "vertex_master.udwh"
+#include "vertex_filter_master.udwh"
+#include "vertex_filter_master_local.udwh"
+#include "intersection_launchers.udwh"
+#include "flag.udwh"
+#include "common.udwh"
+
+/*
+	Init
+	main_master::init_tc -> master_launcher -> read_master_dram_length                         -> main_master::init_done
+	                     -> intersection_launcher::intersection_init -> intersection_init_done ->
+	
+	Launch V
+	main_master::start -> launch_v -> read_v1_from_dram -> vertex_master__launch -> vertex_term -> main_master::v_launcher_done
+
+	Flag V all launched
+	main_master::v_all_launched -> all_launched   -> main_master::int_launcher_done
+	                            -> reduce_num_int ->
+*/
+
+
+
+
+thread filter_launcher {
+    unsigned long num_threads_active;
+    long* master_dram_tail_ptr;
+    long* master_dram_head_ptr;
+    unsigned long num_v;
+    unsigned long deleted_edges;
+    unsigned long k;
+    long* g_v;
+    long* g_v_write;
+    long* master_dram_write_ptr;
+    unsigned long cont;
+    long count;
+    unsigned long updated_edges;
+
+
+	/* ------------------ Initilization ------------------- */
+    event start(long _k, long* _g_v, long* master_addr, long* master_addr_write, long _num_combine, long local_flag, long* _g_v_local, long next_size){
+#ifdef DEBUG
+        print("[DEBUG]<start> k = %lu, _g_v = 0x%lx, master_addr = 0x%lx, master_addr_write = 0x%lx, _num_combine = %lu",  _k, _g_v, master_addr, master_addr_write, _num_combine);
+        print("[DEBUG]<start> local_flag = %lu, _g_v_local = 0x%lx, next_size = %lu",  local_flag, _g_v_local, next_size);
+#endif
+
+        // send_event(CCONT, 0, NETID, IGNRCONT);
+        // yield_terminate;
+        long tmp = next_size * NETID;
+        long* master_addr_tmp = master_addr + tmp;
+        send_dram_read(master_addr_tmp, 1, read_master_dram_length);
+        num_threads_active = 0;
+        master_dram_tail_ptr = master_addr_tmp + 8;
+        master_dram_head_ptr = master_dram_tail_ptr;
+        master_dram_write_ptr = master_addr_write + tmp;
+        master_dram_write_ptr = master_dram_write_ptr + 8;
+        num_v = 0;
+        deleted_edges = 0;
+        updated_edges = 0;
+        k = _k;
+        g_v = _g_v;
+        cont = CCONT;
+        count = 1;
+        g_v_write = _g_v;
+        if(local_flag == 1){
+            g_v_write = _g_v_local;
+        }
+                  
+        yield;
+    }
+
+       event read_master_dram_length(long length){
+        #ifdef DEBUG
+        print("[DEBUG][NWID %lu] <read_master_dram_length> length = %lu", NETID, length);
+        #endif
+
+        if(length == 0){
+            send_event(cont, deleted_edges, updated_edges, num_v, IGNRCONT);
+            yield_terminate;
+        }
+        long length_bytes = length << WORD_SIZE_LOG2;
+        master_dram_tail_ptr = master_dram_head_ptr + length_bytes;
+        long num_threads = NUM_FILTERS;
+        if(num_threads > length){
+            num_threads = length;
+        }
+
+        unsigned long* local lmbuff = LMBASE + (SENDBUFFER * 8);
+        lmbuff[0] = g_v;
+        lmbuff[2] = k;
+
+        if(g_v == g_v_write){
+            length_bytes = evw_new(NETID, vertex_filter_master__launch);
+            while(num_threads_active < num_threads)
+            {
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <read_master_dram_length> num_threads_active = %lu", NETID, num_threads_active);
+                #endif
+                lmbuff[1] = master_dram_head_ptr;
+                lmbuff[3] = num_threads_active;
+                send_event(length_bytes, lmbuff, 4, vertex_term);
+                // send_dram_read(master_dram_head_ptr, 1, receive_dram);
+                master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+                num_threads_active = num_threads_active + 1;
+            }
+        }else{
+            lmbuff[4] = g_v_write;
+            length_bytes = evw_new(NETID, vertex_filter_master_local__launch);
+            while(num_threads_active < num_threads)
+            {
+                #ifdef DEBUG
+                print("[DEBUG][NWID %lu] <read_master_dram_length> num_threads_active = %lu", NETID, num_threads_active);
+                #endif
+                lmbuff[1] = master_dram_head_ptr;
+                lmbuff[3] = num_threads_active;
+                send_event(length_bytes, lmbuff, 5, vertex_term);
+                // send_dram_read(master_dram_head_ptr, 1, receive_dram);
+                master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+                num_threads_active = num_threads_active + 1;
+            }
+        }
+    }
+
+
+    event vertex_term(long _deleted_edges, long _deg, long _v, long offset_idx, long _total_edges){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <vertex_term> _deleted_edges = %lu, _deg = %lu, _v = %lu", NETID, _deleted_edges, _deg, _v);
+#endif
+        // vertex thread terminated
+		num_threads_active = num_threads_active - 1;
+        if(_deg > 0){
+            num_v = num_v + 1;
+            send_dram_write(master_dram_write_ptr, _v, write_return);
+            master_dram_write_ptr = master_dram_write_ptr + 8;
+            count = count + 1;
+            // print("[DEBUG][NWID %lu] <vertex_term> _deleted_edges = %lu, v1:%lu, deg:%lu", NETID, _deleted_edges, _v, _deg);
+        }
+        deleted_edges = deleted_edges + _deleted_edges;
+        updated_edges = updated_edges + _deg;
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <vertex_term>: head:%lu, tail:%lu", NETID, master_dram_head_ptr, master_dram_tail_ptr);
+#endif
+
+		if(master_dram_head_ptr == master_dram_tail_ptr){	// head == tail So nothing more to launch! 
+#ifdef DEBUG
+        	print("[DEBUG][NWID %lu] <vertex_term>: nothing in DRAM, num_threads_active :%lu", NETID, num_threads_active);
+#endif
+        	if(num_threads_active == 0){
+                long *master_dram_len_ptr = num_v * 8;
+                master_dram_len_ptr = master_dram_len_ptr + 8;
+                master_dram_len_ptr = master_dram_write_ptr - master_dram_len_ptr;
+                send_dram_write(master_dram_len_ptr, num_v, write_return);
+                // print("[DEBUG][NWID %lu] master_dram_len_ptr = 0x%lx, length = %lu", NETID, master_dram_len_ptr, num_v);
+            }
+			yield;
+        }
+        // Check if there's stuff in memory
+		if(master_dram_head_ptr != master_dram_tail_ptr){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <vertex_term>: read at :%lu", NETID, master_dram_head_ptr);
+#endif
+            unsigned long* local lmbuff = LMBASE + (SENDBUFFER * 8);
+            lmbuff[0] = g_v;
+            lmbuff[1] = master_dram_head_ptr;
+            lmbuff[2] = k;
+            lmbuff[3] = offset_idx;
+            if(g_v == g_v_write){
+                long evword = evw_new(NETID, vertex_filter_master__launch);
+                send_event(evword, lmbuff, 4, vertex_term);
+            }else{
+                lmbuff[4] = g_v_write;
+                long evword = evw_new(NETID, vertex_filter_master_local__launch);
+                send_event(evword, lmbuff, 5, vertex_term);
+            }
+            // send_dram_read(master_dram_head_ptr, 1, receive_dram);
+            master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+            num_threads_active = num_threads_active + 1;
+        }
+    }
+
+    event write_return(){
+        count = count - 1;
+        if(count == 0){
+            send_event(cont, deleted_edges, updated_edges, num_v, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}

@@ -1,0 +1,5 @@
+#ifndef __vertex_filter_master_local_exe_H__
+#define __vertex_filter_master_local_exe_H__
+
+extern event vertex_filter_master_local__launch();
+#endif

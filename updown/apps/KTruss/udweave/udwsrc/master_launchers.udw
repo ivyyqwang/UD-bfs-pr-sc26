@@ -1,0 +1,503 @@
+// This is all metadata information
+#include "vertex_master.udwh"
+#include "intersection_launchers.udwh"
+#include "flag.udwh"
+#include "common.udwh"
+
+/*
+	Init
+	main_master::init_tc -> master_launcher -> intersection_launcher::intersection_init -> intersection_init_done ->  -> main_master::init_done
+	
+	Launch V
+	main_master::start -> launch_v -> read_v1_from_dram -> vertex_master__launch -> vertex_term -> main_master::v_launcher_done
+
+	Flag V all launched
+	main_master::v_all_launched -> all_launched   -> main_master::int_launcher_done
+	                            -> reduce_num_int ->
+*/
+
+
+
+
+thread master_launcher {
+    long num_threads_active;
+    long* master_dram_tail_ptr;
+    long* master_dram_head_ptr;
+    unsigned long* local lmbuff;
+    long num_combine;
+    long num_v;
+    long* master_dram_write_ptr;
+    long count;
+    long tc;
+    long num_int;
+
+    	/* ------------------ Initilization ------------------- */
+    event init(long* master_start0, long master_size, long* intersection_addr, long intersection_size, long* g_v, long num_lanes_total, long cache_len, long _combine, long* master_start1){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] MASTER launcher num_lanes:%lu num_masters:%lu", NETID, num_lanes, num_masters_per_lane);
+        print("[DEBUG][NWID %lu] MASTER launcher num_intersections:%lu master_size:%lu int_size:%lu g_v:%lu", NETID, num_intersections_per_lane, master_size, intersection_size, g_v);
+        print("[DEBUG][NWID %lu] saved continuation:%lu", NETID, CCONT);
+#endif
+        unsigned long tmp = NETID * intersection_size;
+        tmp = intersection_addr + tmp;
+        long evword = evw_new(NETID, intersection_launcher__intersection_init);
+        send_event(evword, tmp, intersection_size, CCONT);
+
+        lmbuff = LMBASE + MASTER_THREADID_OFFSET;
+        lmbuff[0] = TID;
+  
+        lmbuff = LMBASE;
+		lmbuff[NUM_V_THREAD] = NUM_MASTERS;
+        lmbuff[G_V] = g_v;
+        lmbuff[NUM_LANES_TOTAL] = num_lanes_total - 1;
+        lmbuff[NEXT_MASTER_SIZE] = master_size;
+        // print("[DEBUG][NWID %lu] NUM_LANES_TOTAL:%lu", NETID, num_lanes_total);
+
+        lmbuff = LMBASE + CACHE_LEN_OFFSET;
+        lmbuff[0] = cache_len - 1;
+        tc = 0;
+        num_int = 0;
+        // print("[DEBUG][NWID %lu] cache_len:%lu", NETID, cache_len);
+
+        tmp = master_size * _combine;
+        tmp = tmp * NETID;
+        master_dram_head_ptr = master_start0 + tmp;
+        lmbuff = LMBASE + (MASTER_LAUNCHER << 3);
+        lmbuff[ALL_LAUNCHED] = 0;
+        if(_combine == 1){
+            num_combine = 1;
+            num_combine = num_combine << 32;
+        }else{
+            num_combine = _combine;
+            master_dram_write_ptr = master_start1 + tmp;
+            unsigned long* local temp_lmbuff = LMBASE + MASTER_START_OFFSET;
+            temp_lmbuff[0] = master_dram_write_ptr;
+            tmp = NETID * num_combine;
+            lmbuff[DRAM_END] = tmp;
+            lmbuff[DRAM_START] = master_dram_head_ptr + master_size;
+        }
+
+        num_v = 0;
+        num_threads_active = 0;
+        
+        yield;
+    }
+
+
+
+	/* ------------------ Launch Vertices ------------------- */
+    
+    event launch_v(){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <launch_v>", NETID);
+#endif
+        long flag = num_combine >> 32;
+        if(flag == 1){ // no compaction
+            send_dram_read(master_dram_head_ptr, 1, read_master_dram_length);
+            master_dram_head_ptr = master_dram_head_ptr + 8;
+        }else{
+            long netid = lmbuff[DRAM_END];
+            unsigned long evword = evw_new(netid, read_remote_data);
+            send_event(evword, master_dram_head_ptr, read_master_dram_length_compact);
+            master_dram_head_ptr = master_dram_head_ptr + 8;
+            master_dram_write_ptr = master_dram_write_ptr + 8;
+            master_dram_tail_ptr = master_dram_head_ptr;
+            num_combine = num_combine << 1;
+            num_combine = num_combine - 1;
+            count = 1;
+        }
+
+        lmbuff[MAINCONT] = CCONT;
+    }
+
+    event read_master_dram_length(long length, long* read_addr){
+        lmbuff[ALL_LAUNCHED] = 1;
+        num_v = num_v + length;
+        if(length == 0){
+            lmbuff[ALL_LAUNCHED] = 2;
+            unsigned long* local tmp_lmbuff = LMBASE + MASTER_THREADID_OFFSET;
+            long tid = -1;
+            tmp_lmbuff[0] = tid;
+            long evword = lmbuff[MAINCONT];
+            send_event(evword, num_v, NETID, IGNRCONT);
+            yield_terminate;
+        }
+
+        // print("[DEBUG][NWID %lu] <read_master_dram_length> length = %lu, num_combine = %lu, addr = 0x%lX", NETID, length, num_combine, read_addr);
+        unsigned long length_bytes = length << WORD_SIZE_LOG2;
+        master_dram_tail_ptr = master_dram_head_ptr + length_bytes;
+
+        long *local temp_lmbuff = LMBASE;
+        long num_threads_total = temp_lmbuff[NUM_V_THREAD];
+        length_bytes = num_threads_active + length;
+        if(num_threads_total > length_bytes){
+            num_threads_total = length_bytes;
+        }
+        
+        master_dram_write_ptr =  master_dram_tail_ptr;
+        while(num_threads_active < num_threads_total)
+        {
+            #ifdef DEBUG
+            print("[DEBUG][NWID %lu] <read_master_dram_length> num_threads_active = %lu", NETID, num_threads_active);
+            #endif
+            send_dram_read(master_dram_head_ptr, 1, receive_dram);
+            master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+            num_threads_active = num_threads_active + 1;
+            // num_v = num_v + 1;
+        }
+       
+        if(master_dram_head_ptr == master_dram_tail_ptr){
+            length_bytes = 2;
+            lmbuff[ALL_LAUNCHED] = length_bytes;
+            yield;
+        }
+    }
+
+    event receive_dram(long v1, long addr){
+// #ifdef DEBUG
+        // print("[DEBUG][NWID %lu] <receive_dram> received %lu, addr = 0x%lX", NETID, v1, addr);
+// #endif
+        long evword = evw_new(NETID, vertex_master__launch);
+        long* local temp_lmbuff = LMBASE;
+        unsigned long gv = temp_lmbuff[G_V];
+        send_event(evword, gv, v1, vertex_term);
+        yield;
+    }
+
+
+    event read_remote_data(long* read_addr){
+        send_dram_read(read_addr, 1, CCONT);
+        yield_terminate;
+    }
+
+
+    event read_master_dram_length_compact(long length, long* read_addr){
+        // unsigned long temp = master_dram_tail_ptr;
+        // unsigned long temp2 = master_dram_head_ptr;
+        lmbuff[ALL_LAUNCHED] = 1;
+        num_v = num_v + length;
+        num_combine = num_combine - 1;
+        if(length == 0){
+            if(num_combine == 0){
+                lmbuff[ALL_LAUNCHED] = 2;
+                if(num_threads_active == 0){
+                    unsigned long *local temp_lmbuff = LMBASE + MASTER_START_OFFSET;
+                    long * addr = temp_lmbuff[0];
+                    send_dram_write(addr, num_v, write_return);
+                    // print("[DEBUG][NWID %lu] length = %lu, addr = 0x%lX", NETID, num_v, addr);
+                    yield;
+                }
+            }else{
+                    long* addr = lmbuff[DRAM_START];
+                    long netid = lmbuff[DRAM_END];
+                    netid = netid + 1;
+                    unsigned long evword = evw_new(netid, read_remote_data);
+                    send_event(evword, addr, read_master_dram_length_compact);
+                    lmbuff[DRAM_END] = netid;
+                    master_dram_head_ptr = addr + 8;
+                    master_dram_tail_ptr = master_dram_head_ptr;
+                    unsigned long* local temp_lmbuff = LMBASE;
+                    evword = temp_lmbuff[NEXT_MASTER_SIZE];
+                    evword = addr + evword;
+                    lmbuff[DRAM_START] = evword;
+                    num_combine = num_combine - 1;
+                    yield;
+            }
+            yield;
+        }
+
+        // print("[DEBUG][NWID %lu] <read_master_dram_length> length = %lu, num_combine = %lu, addr = 0x%lX", NETID, length, num_combine, read_addr);
+        unsigned long length_bytes = length << WORD_SIZE_LOG2;
+        master_dram_tail_ptr = master_dram_head_ptr + length_bytes;
+
+        long *local temp_lmbuff = LMBASE;
+        long num_threads_total = temp_lmbuff[NUM_V_THREAD];
+        length_bytes = num_threads_active + length;
+        if(num_threads_total > length_bytes){
+            num_threads_total = length_bytes;
+        }
+        
+        unsigned long netid = lmbuff[DRAM_END];
+        length_bytes = evw_new(netid, read_remote_data);
+        while(num_threads_active < num_threads_total)
+        {
+            #ifdef DEBUG
+            print("[DEBUG][NWID %lu] <read_master_dram_length> num_threads_active = %lu", NETID, num_threads_active);
+            #endif
+            send_event(length_bytes, master_dram_head_ptr, receive_dram_remote);
+            master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+            num_threads_active = num_threads_active + 1;
+            // num_v = num_v + 1;
+        }
+
+        if(master_dram_head_ptr == master_dram_tail_ptr){
+            if(num_combine == 0){
+                length_bytes = 2;
+                lmbuff[ALL_LAUNCHED] = length_bytes;
+                yield;
+            }else{
+                length_bytes = lmbuff[DRAM_START];
+                netid = netid + 1;
+                lmbuff[DRAM_END] = netid;
+                num_threads_total = evw_new(netid, read_remote_data);
+                send_event(num_threads_total, length_bytes, read_master_dram_length_compact);
+                master_dram_head_ptr = length_bytes + 8;
+                master_dram_tail_ptr = master_dram_head_ptr;
+                temp_lmbuff = LMBASE;
+                netid = temp_lmbuff[NEXT_MASTER_SIZE];
+                netid = length_bytes + netid;
+                lmbuff[DRAM_START] = netid;
+                num_combine = num_combine - 1;
+                yield;
+            }
+        }
+    }
+
+
+    event receive_dram_remote(long v1, long* addr){
+// #ifdef DEBUG
+        if(v1 == 5){
+            long netid = lmbuff[DRAM_END];
+            print("[DEBUG][NWID %lu] <receive_dram_remote> received %lu, addr = 0x%lX, netid %lu, master = 0x%lx, 0x%lx", NETID, v1, addr, netid, master_dram_head_ptr, master_dram_tail_ptr);
+        }
+// #endif
+        long evword = evw_new(NETID, vertex_master__launch);
+        long* local temp_lmbuff = LMBASE;
+        unsigned long gv = temp_lmbuff[G_V];
+        send_event(evword, gv, v1, vertex_term);
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <master_receive_dram> num_threads_total:%lu thread_active:%lu", NETID, num_threads_total, num_threads_active);
+        print("[DEBUG][NWID %lu] <receive_dram>: num_int = %lu", NETID, num_int);
+#endif
+        count = count + 1;
+        send_dram_write(master_dram_write_ptr, v1, write_return);
+        master_dram_write_ptr = master_dram_write_ptr + 8;
+
+        yield;
+    }
+
+    event vertex_term(long _num_int){
+        // vertex thread terminated
+		num_threads_active = num_threads_active - 1;
+        num_int = num_int + _num_int;
+        
+        long num_threads_total = num_combine >> 32;
+        if(num_threads_total == 1){  // no compact
+            if(master_dram_head_ptr == master_dram_tail_ptr){	// head == tail So nothing more to launch! 
+                lmbuff[ALL_LAUNCHED] = 2;
+                if(num_threads_active == 0){
+                    long evword = lmbuff[MAINCONT];
+                    send_event(evword, num_v, NETID, IGNRCONT);
+                }
+                yield;
+            }
+            long* local temp_lmbuff = LMBASE;
+            num_threads_total = temp_lmbuff[NUM_V_THREAD];
+            while((num_threads_active < num_threads_total) && (master_dram_head_ptr != master_dram_tail_ptr)){
+                send_dram_read(master_dram_head_ptr, 1, receive_dram);
+                master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+                num_threads_active = num_threads_active + 1;
+            }
+            yield;
+        }
+
+		if(master_dram_head_ptr == master_dram_tail_ptr){	// head == tail So nothing more to launch! 
+            if(num_combine == 0){
+                lmbuff[ALL_LAUNCHED] = 2;
+                if(num_threads_active == 0){
+                    unsigned long *local temp_lmbuff = LMBASE + MASTER_START_OFFSET;
+                    long * addr = temp_lmbuff[0];
+                    send_dram_write(addr, num_v, write_return);
+                    // print("[DEBUG][NWID %lu] length = %lu, addr = 0x%lX", NETID, num_v, addr);
+                }
+                yield;
+            }
+			yield;
+        }
+        // Check if there's stuff in memory
+		long* local temp_lmbuff = LMBASE;
+        num_threads_total = lmbuff[DRAM_END];
+        unsigned long evword = evw_new(num_threads_total, read_remote_data);
+        num_threads_total = temp_lmbuff[NUM_V_THREAD];
+        while((master_dram_head_ptr != master_dram_tail_ptr) && (num_threads_active < num_threads_total)){
+    #ifdef DEBUG
+            print("[DEBUG][NWID %lu] <vertex_term>: read at :%lu, num_threads_active = %lu, num_threads_total = %lu", NETID, master_dram_head_ptr, num_threads_active, num_threads_total);
+    #endif
+            send_event(evword, master_dram_head_ptr, receive_dram_remote);
+            master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+            num_threads_active = num_threads_active + 1;
+            // num_v = num_v + 1;
+        }
+        if(master_dram_head_ptr == master_dram_tail_ptr){
+            if(num_combine == 0){
+                lmbuff[ALL_LAUNCHED] = 2;
+                yield;
+            }else{
+                if((num_combine & 1) == 0){
+                    long* addr = lmbuff[DRAM_START];
+                    long netid = lmbuff[DRAM_END];
+                    netid = netid + 1;
+                    evword = evw_new(netid, read_remote_data);
+                    send_event(evword, addr, read_master_dram_length_compact);
+                    lmbuff[DRAM_END] = netid;
+                    master_dram_head_ptr = addr + 8;
+                    master_dram_tail_ptr = master_dram_head_ptr;
+                    temp_lmbuff = LMBASE;
+                    evword = temp_lmbuff[NEXT_MASTER_SIZE];
+                    evword = addr + evword;
+                    lmbuff[DRAM_START] = evword;
+                    num_combine = num_combine - 1;
+                    yield;
+                }
+            }
+        }
+        // if(NETID == 0){
+        //     print("[DEBUG][NWID %lu] <vertex_term> test 0x%lx 0x%lx %lu %lu", NETID, master_dram_head_ptr, master_dram_tail_ptr, num_threads_active , num_threads_total);
+        // }
+    }
+
+    event relaunch(){
+        long* local temp_lmbuff = LMBASE;
+        long num_threads_total = num_combine >> 32;
+        if(num_threads_total == 1){  // no compact
+            num_threads_total = temp_lmbuff[NUM_V_THREAD];
+            while((num_threads_active < num_threads_total) && (master_dram_head_ptr != master_dram_tail_ptr)){
+                send_dram_read(master_dram_head_ptr, 1, receive_dram);
+                master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+                num_threads_active = num_threads_active + 1;
+            }
+            yield;
+        }
+
+        num_threads_total = lmbuff[DRAM_END];
+        unsigned long evword = evw_new(num_threads_total, read_remote_data);
+            
+        while((master_dram_head_ptr != master_dram_tail_ptr) && (num_threads_active < num_threads_total)){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <vertex_term>: read at :%lu, num_threads_active = %lu, num_threads_total = %lu", NETID, master_dram_head_ptr, num_threads_active, num_threads_total);
+#endif
+            send_event(evword, master_dram_head_ptr, receive_dram_remote);
+            master_dram_head_ptr = master_dram_head_ptr + WORD_SIZE;
+            num_threads_active = num_threads_active + 1;
+            // num_v = num_v + 1;
+        }
+        if(master_dram_head_ptr == master_dram_tail_ptr){
+            if(num_combine == 0){
+                lmbuff[ALL_LAUNCHED] = 2;
+                yield;
+            }else{
+                if((num_combine & 1) == 0){
+                    long* addr = lmbuff[DRAM_START];
+                    long netid = lmbuff[DRAM_END];
+                    netid = netid + 1;
+                    evword = evw_new(netid, read_remote_data);
+                    send_event(evword, addr, read_master_dram_length_compact);
+                    lmbuff[DRAM_END] = netid;
+                    master_dram_head_ptr = addr + 8;
+                    master_dram_tail_ptr = master_dram_head_ptr;
+                    // temp_lmbuff = LMBASE;
+                    evword = temp_lmbuff[NEXT_MASTER_SIZE];
+                    evword = addr + evword;
+                    lmbuff[DRAM_START] = evword;
+                    num_combine = num_combine - 1;
+                    yield;
+                }
+            }
+        }
+    }
+
+    event write_return(){
+        count = count - 1;
+        if(count == 0){
+            long evword = lmbuff[MAINCONT];
+            send_event(evword, num_v, NETID, IGNRCONT);
+            if(num_v == 0){
+                unsigned long* local tmp_lmbuff = LMBASE + MASTER_THREADID_OFFSET;
+                long tid = -1;
+                tmp_lmbuff[0] = tid;
+                // print("[DEBUG][NWID %lu] <write_return>: num_v = %ld", NETID, num_v);
+                yield_terminate;
+            }
+        }
+    }
+
+
+    event all_launched(){
+        lmbuff[ALL_LAUNCHED] = 3;
+        lmbuff[MAINCONT] = CCONT;
+
+        if(num_int == 0){
+            send_event(CCONT, tc, IGNRCONT);
+            // print("[DEBUG][NWID %lu] <all_launched>: num_int = %lu", NETID, num_int);
+            yield_terminate;
+        }
+    }
+
+    event reduce_num_int(long _tc, long* addr){
+        num_int = num_int - 1;
+        tc = tc + _tc;
+        // print("[DEBUG][NWID %lu] <reduce_num_int>: tc = %ld, num_int = %lu", NETID, tc, num_int);
+
+//         if(_tc > 0){
+//             unsigned long* local tmp_lmbuff2 = LMBASE + WORKER_THREADID_OFFSET;
+//             int tid = tmp_lmbuff2[0];
+//             unsigned long evword = evw_update_event(CEVNT, intersection_launcher__add_value);
+//             evword = evw_update_thread(evword, tid);
+//             send_event(evword, addr, _tc, IGNRCONT);
+//             evword = temp_lmbuff[NUM_WRITE];
+//             evword = evword + 1;
+//             temp_lmbuff[NUM_WRITE] = evword;
+// #ifdef DEBUG
+//             print("<reduce_num_int> addr = 0x%lx, NUM_WRITE = %lu", addr, temp + 1);
+// #endif
+
+//         }
+
+        if(num_int == 0){
+            unsigned long launch = lmbuff[ALL_LAUNCHED];
+            if(launch == 3){
+                long evword = lmbuff[MAINCONT];
+                send_event(evword, tc, IGNRCONT);
+                // print("[DEBUG][NWID %lu] <reduce_num_int>: tc = %ld", NETID, tc);
+                yield_terminate;
+            }
+        }
+    }
+
+	event send_to_master_thread1(long op0, long op1){
+        unsigned long* local tmp_lmbuff = LMBASE + MASTER_THREADID_OFFSET;
+        long tid = tmp_lmbuff[0];
+        if(tid == -1){
+            send_event(CCONT, 0, IGNRCONT);
+            yield_terminate;
+        }
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread1> tid:%ld, CCONT=%lu", NETID, tid, CCONT);
+#endif
+        unsigned long evword = evw_update_thread(op0, tid);
+        send_event(evword, op1, CCONT);
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread1> op1:%lu", NETID, op1);
+#endif
+        yield_terminate;
+    }
+
+    event send_to_master_thread2(long op0, long op1, long op2){
+        unsigned long* local tmp_lmbuff = LMBASE + MASTER_THREADID_OFFSET;
+        long tid = tmp_lmbuff[0];
+        // if(tid == -1){
+        //     send_event(CCONT, 0, IGNRCONT);
+        //     yield_terminate;
+        // }
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread2> tid:%ld, CCONT=%lu", NETID, tid, CCONT);
+#endif
+        unsigned long evword = evw_update_thread(op0, tid);
+        send_event(evword, op1, op2, CCONT);
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <send_to_worker_thread2> op1:%lu, op2=%lu", NETID, op1, op2);
+#endif
+        yield_terminate;
+    }
+}
+
