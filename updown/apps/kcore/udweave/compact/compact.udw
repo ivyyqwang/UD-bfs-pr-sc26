@@ -1,0 +1,647 @@
+#define NUM_THREADS 127
+#define NUM_DRAM_ACCESS 64
+#define DATA_PER_THREAD (NUM_DRAM_ACCESS * 8)
+
+#define TOP_FLAG              0
+#define NUM_EMPTY             1
+#define SEND_BUFFER           2
+#define HEAP                  16
+
+#define args_scratch_space (LMBASE + SEND_BUFFER * 8)
+
+// #define DEBUG
+
+thread compact_master {
+    unsigned long num_map_done;
+    unsigned long num_map;
+    unsigned long control_level;
+    unsigned long cont;
+
+    unsigned long num_empty;
+    long num_edges;
+    long ew0;
+    long ew1;
+    long edge0;
+    long num_verts_per_lane;
+
+    
+    event start(unsigned long _num_lanes, unsigned long* _gv, unsigned long _num_verts, unsigned long _num_verts_per_lane, unsigned long _control_level, long _k){
+        // #ifdef DEBUG
+        // print("[DEBUG][NWID %lu] <start> _num_lanes = %lu, control_level = %lu", NETID, _num_lanes, _control_level);
+        // #endif
+        unsigned long* local lmbuff = LMBASE;
+        if(_control_level == 0){
+            print("compact Start");
+            lmbuff[0] = 0;
+        }
+        
+        cont = CCONT;
+        control_level = _control_level;
+
+        if(_num_lanes <= 2){
+            num_map = _num_lanes;
+             // start start 
+            lmbuff = args_scratch_space;
+            lmbuff[0] = _gv;
+            lmbuff[1] = _num_verts_per_lane;
+            lmbuff[2] = _num_verts;
+            lmbuff[3] = _k;
+
+            int netid = NETID;
+            int lane_end = netid + _num_lanes;
+            while(netid < lane_end){
+                long evword = evw_new(netid, compact_worker::start);
+                send_event(evword, lmbuff, 4, start_done);
+                netid = netid + 1;
+            }
+        }else{
+            num_map = 2;
+            long num_lanes = _num_lanes >> 1;
+            lmbuff = args_scratch_space;
+            lmbuff[0] = num_lanes;
+            lmbuff[1] = _gv;
+            lmbuff[2] = _num_verts;
+            lmbuff[3] = _num_verts_per_lane;
+            lmbuff[4] = _control_level + 1;
+            lmbuff[5] = _k;
+
+            long mlane_id = NETID;
+            long evword = evw_new(mlane_id, start);
+            send_event(evword, lmbuff, 6, start_done);
+
+            lmbuff[0] = _num_lanes - num_lanes;
+            mlane_id = mlane_id + num_lanes;
+            evword = evw_new(mlane_id, start);
+            send_event(evword, lmbuff, 6, start_done);
+        }
+
+        num_map_done = 0;
+        num_empty = 0;
+        num_edges = 0;
+        edge0 = 0;
+        num_verts_per_lane = _num_verts_per_lane;
+        
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start> end", NETID);
+#endif
+        yield;
+    }
+
+
+    event start_done(long _num_empty, long _edges, long _netid){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start_done> from :%lu, num_map_done :%lu, control_level: %lu", NETID, nwid, num_map_done, control_level);
+#endif
+        num_map_done = num_map_done + 1;
+        num_empty = num_empty + _num_empty;
+        num_edges = num_edges + _edges;
+        if(_netid == NETID){
+            edge0 = _edges;
+            ew0 = CCONT;
+        }else{
+            ew1 = CCONT;
+        }
+
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                send_event(ew0, 0, num_verts_per_lane, edge_before_end);
+                if(num_map == 2){
+                    send_event(ew1, edge0, num_verts_per_lane, edge_before_end);
+                }
+            }
+            else{
+                send_event(cont, num_empty, num_edges, NETID, edge_before_start);
+            }
+        }
+        yield;
+    }
+
+    event edge_before_start(long _num_edges){
+        cont = CCONT;
+        if(num_map == 2){
+            send_event(ew0, _num_edges, num_verts_per_lane, edge_before_end);
+            send_event(ew1, _num_edges + edge0, num_verts_per_lane, edge_before_end);
+        }else{
+            send_event(ew0, _num_edges, num_verts_per_lane, edge_before_end);
+        }
+    }
+
+    event edge_before_end(long _netid){
+        num_map_done = num_map_done + 1;
+        if(num_map_done == num_map){
+            if(control_level == 0){
+                print("compact End");
+                unsigned long* local lmbuff = LMBASE;
+                lmbuff[TOP_FLAG] = 1;
+                lmbuff[NUM_EMPTY] = num_empty;
+                yield_terminate;
+            }else{
+                send_event(cont, NETID, IGNRCONT);
+                yield_terminate;
+            }
+        }
+
+    }
+
+}
+
+
+thread compact_worker {
+    long vid;
+    long num_verts;
+    long outstanding;
+    long total_lanes;
+    long cont;
+    unsigned long num_empty;
+    long k;
+    long * gv;
+    long num_edges;
+
+    event start(unsigned long* _gv, unsigned long _num_verts_per_lane, unsigned long _num_verts, long _k){
+        // print("_num_verts_per_lane = %lu, _num_verts = %lu, _k = %lu", _num_verts_per_lane, _num_verts, _k);
+        vid = (NETID + 1) * _num_verts_per_lane;
+        if(vid > _num_verts){
+            vid = vid - _num_verts_per_lane;
+            num_verts = _num_verts - vid;
+        }else{
+            vid = vid - _num_verts_per_lane;
+            num_verts =  _num_verts_per_lane;
+        }
+        num_verts = num_verts + vid;
+        outstanding = 0;
+        long evword = evw_new(NETID, compact_thread::start);
+        unsigned long *local args = args_scratch_space;
+        args[0] = _gv;
+        args[1] = _k;
+
+        while(vid < num_verts){
+            args[2] = vid;
+            args[3] = outstanding;
+            send_event(evword, args, 4, v_return);
+            outstanding = outstanding + 1;
+            vid = vid + 1;
+            if(outstanding >= NUM_THREADS){
+                break;
+            }
+        }
+        if(outstanding == 0){
+            send_event(CCONT, 0, 0, NETID, start2);
+            yield;
+        }
+        cont = CCONT;
+        k = _k;
+        gv = _gv;
+        num_empty = 0;
+        num_edges = 0;
+    }
+
+    event v_return(long _num_empty, long _tid, long _num_edges){
+        num_empty = num_empty + _num_empty;
+        num_edges = num_edges + _num_edges;
+        if(vid < num_verts){
+            long evword = evw_new(NETID, compact_thread::start);
+            unsigned long *local args = args_scratch_space;
+            args[0] = gv;
+            args[1] = k;
+            args[2] = vid;
+            args[3] = _tid;
+            send_event(evword, args, 4, v_return);
+            vid = vid + 1;
+        }else{
+            outstanding = outstanding - 1;
+        }
+        if(outstanding == 0){
+            send_event(cont, num_empty, num_edges, NETID, start2);
+            yield;
+        }
+    }
+
+    event start2(long _num_edges, long _num_verts_per_lane){
+        num_edges = _num_edges;
+        cont = CCONT;
+        vid = NETID * _num_verts_per_lane;
+        gv = gv + 8;
+        outstanding = 0;
+
+        if(vid < num_verts){
+            long *v_ptr = gv + (vid << 6);  // 8 words
+            send_dram_read(v_ptr, 3, v_return2);
+            vid = vid + 1;
+            outstanding = outstanding + 1;
+        }else{
+            send_event(cont, NETID, IGNRCONT);
+            yield_terminate;
+        }
+    }
+
+    event v_return2(unsigned long _deg, unsigned long _edges_before, long _vid, unsigned long *addr){
+        unsigned long* local lmbuff = args_scratch_space;
+        lmbuff[0] = num_edges;
+        lmbuff[1] = _vid;
+        lmbuff[2] = _deg;
+        send_dram_write(addr + 8, lmbuff, 3, write_done2);
+        num_edges = num_edges + _deg;
+        if(vid < num_verts){
+            long *v_ptr = gv + (vid << 6);  // 8 words
+            send_dram_read(v_ptr, 3, v_return2);
+            vid = vid + 1;
+            outstanding = outstanding + 1;
+        }
+    }
+
+    event write_done2(){
+        outstanding = outstanding - 1;
+        if(outstanding == 0){
+            if(vid == num_verts){
+                send_event(cont, NETID, IGNRCONT);
+                yield_terminate;
+            }
+        }
+    }
+    
+}
+    
+thread compact_thread {
+    long vid;
+    long deg;
+    long tid;
+    long k;
+    long* gv;
+    long new_deg;
+    unsigned long *local scratch;
+    long* neigh_ptr;
+    long* write_ptr;
+    long outgoing;
+    long cont;
+
+    event start(unsigned long* _gv, long _k, unsigned long _vid, long _tid){
+        // print("vid = %lu", _vid);
+        long *v_ptr = _gv + (_vid << 6);  // 8 words
+        send_dram_read(v_ptr, 5, v_return);
+
+        gv = _gv;
+        k = _k;
+        tid = _tid;
+        new_deg = 0;
+        scratch = LMBASE + HEAP * 8 + tid * DATA_PER_THREAD;
+        outgoing = 0;
+        cont = CCONT;
+        vid = _vid;
+    }
+
+    event v_return(long * _dest, long _deg, long _edges_before, long _vid, long _real_deg, long * _addr){
+        // if(vid == 0){
+        //     print("vid = %lu, real_deg = %lu, k = %lu", vid, _real_deg, k);
+        // }
+        if(_real_deg < k) {
+            send_dram_write(_addr + 8, 0, write_done1);
+            yield;
+        }
+        deg = _deg;
+        neigh_ptr = _dest;
+        if(deg > 0){
+            send_dram_read(neigh_ptr, 8, read_nl0);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 8){
+            send_dram_read(neigh_ptr, 8, read_nl1);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 16){
+            send_dram_read(neigh_ptr, 8, read_nl2);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 24){
+            send_dram_read(neigh_ptr, 8, read_nl3);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 32){
+            send_dram_read(neigh_ptr, 8, read_nl4);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 40){
+            send_dram_read(neigh_ptr, 8, read_nl5);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 48){
+            send_dram_read(neigh_ptr, 8, read_nl6);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        if(deg > 56){
+            send_dram_read(neigh_ptr, 8, read_nl7);
+            neigh_ptr = neigh_ptr + 64;
+            outgoing = outgoing + 1;
+        }
+        write_ptr = _dest;
+    }
+
+    event read_nl0(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+    event read_nl1(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 64, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+    event read_nl2(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 128, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+    event read_nl3(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 192, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+    event read_nl4(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 256, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+    event read_nl5(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 320, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+
+    event read_nl6(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 384, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+
+    event read_nl7(long op0, long op1, long op2, long op3, long op4, long op5, long op6, long op7){
+        copyOperands(op0, scratch + 448, 8);
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg >= NUM_DRAM_ACCESS){
+                outgoing = NUM_DRAM_ACCESS;
+                deg = deg - outgoing;
+            }else{
+                outgoing = deg;
+                deg = 0;
+            }
+            long tmp = 0;
+            while(tmp < outgoing){
+                tmp = tmp + 1;
+                long tmp_vid = scratch[0];
+                scratch = scratch + 8;
+                long* tmp_addr = gv + (tmp_vid << 6);
+                send_dram_read(tmp_addr, 5, read_neigh_v);
+            }
+        }
+    }
+
+    event read_neigh_v(long * _dest, long _deg, long _edges_before, long _vid, long _real_deg, long * _addr){
+        // if(vid == 0){
+        //     print("_vid = %lu, _real_deg = %lu, new_deg = %lu, k = %lu", _vid, _real_deg, new_deg, k);
+        // }
+        if(_real_deg >= k){
+            send_dram_write(write_ptr, _vid, write_neigh_v);
+            write_ptr = write_ptr + 8;
+            new_deg = new_deg + 1;
+        }else{
+            outgoing = outgoing - 1;
+            if(outgoing == 0){
+                if(deg == 0){
+                    long *v_ptr = gv + (vid << 6);
+                    send_dram_write(v_ptr + 8, new_deg, write_done2);
+                    yield;
+                }
+                scratch = LMBASE + HEAP * 8 + tid * DATA_PER_THREAD;
+                if(deg > 0){
+                    send_dram_read(neigh_ptr, 8, read_nl0);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 8){
+                    send_dram_read(neigh_ptr, 8, read_nl1);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 16){
+                    send_dram_read(neigh_ptr, 8, read_nl2);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 24){
+                    send_dram_read(neigh_ptr, 8, read_nl3);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 32){
+                    send_dram_read(neigh_ptr, 8, read_nl4);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 40){
+                    send_dram_read(neigh_ptr, 8, read_nl5);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 48){
+                    send_dram_read(neigh_ptr, 8, read_nl6);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+                if(deg > 56){
+                    send_dram_read(neigh_ptr, 8, read_nl7);
+                    neigh_ptr = neigh_ptr + 64;
+                    outgoing = outgoing + 1;
+                }
+            }
+        }
+    }
+
+    event write_neigh_v(){
+        outgoing = outgoing - 1;
+        if(outgoing == 0){
+            if(deg == 0){
+                long *v_ptr = gv + (vid << 6);
+                send_dram_write(v_ptr + 8, new_deg, write_done2);
+                yield;
+            }
+            if(deg > 0){
+                send_dram_read(neigh_ptr, 8, read_nl0);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 8){
+                send_dram_read(neigh_ptr, 8, read_nl1);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 16){
+                send_dram_read(neigh_ptr, 8, read_nl2);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 24){
+                send_dram_read(neigh_ptr, 8, read_nl3);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 32){
+                send_dram_read(neigh_ptr, 8, read_nl4);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 40){
+                send_dram_read(neigh_ptr, 8, read_nl5);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 48){
+                send_dram_read(neigh_ptr, 8, read_nl6);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+            if(deg > 56){
+                send_dram_read(neigh_ptr, 8, read_nl7);
+                neigh_ptr = neigh_ptr + 64;
+                outgoing = outgoing + 1;
+            }
+        }
+    }
+
+    event write_done1(){
+        send_event(cont, 1, tid, new_deg, IGNRCONT);
+        yield_terminate;
+    }
+
+    event write_done2(){
+        send_event(cont, 0, tid, new_deg, IGNRCONT);
+        yield_terminate;
+    }
+
+}

@@ -1,0 +1,2669 @@
+// =============================================================================
+// kcore.udw — K-Core decomposition kernel for the UpDown accelerator
+// =============================================================================
+//
+// ALGORITHM OVERVIEW:
+//   K-core decomposition iteratively finds the maximal subgraph where every
+//   vertex has at least k neighbors. Each iteration:
+//     1. For each non-deleted vertex, count how many neighbors are still alive
+//        (degree > 0). This count is the vertex's "score".
+//     2. Write the score back to the vertex's scratch1 field in DRAM.
+//     3. Return control to TOP (host). TOP deletes vertices with score < k,
+//        increments k, and launches the next iteration.
+//
+// THREAD HIERARCHY (work distribution tree):
+//   The code builds a tree to distribute vertex processing across lanes:
+//
+//   KCORE_MULTI_main  (root — runs on lane 0, interface to TOP host)
+//     │
+//     └─► split_vertexsKCORE_MULTI      (8-way splitter, used when >2048 lanes)
+//     OR  split_vertexs2KCORE_MULTI     (binary splitter, used when ≤2048 lanes)
+//           ├─► [recurse: split again]
+//           └─► [recurse: split again]
+//                 ...
+//                 └─► process_vertexs_on_one_lane_KCORE_MULTI
+//                       (leaf: process multiple vertices sequentially on 1 lane)
+//                 OR  process_vertex_KCORE_MULTI
+//                       (1 high-degree vertex split across multiple lanes)
+//                       ├─► process_partial_vertex_on_one_lane_KCORE_MULTI
+//                       └─► process_partial_vertex_on_one_lane_KCORE_MULTI
+//                     OR  process_vertex_on_one_lane_KCORE_MULTI
+//                           (1 vertex, all edges, 1 lane)
+//
+// LANE ALLOCATION:
+//   Lanes are allocated proportionally to work:
+//     work = VERTEX_WORK_FACTOR * num_vertices + num_edges
+//   This ensures highly-skewed graphs (some vertices with many edges)
+//   get more lanes for their sub-ranges.
+//
+// ITERATION PROTOCOL:
+//   1. Leaf workers finish → send (unused, max_delta, run_iter_event) up via CCONT
+//   2. Splitters aggregate max_delta, propagate up the tree
+//   3. Root (KCORE_MULTI_main) writes results to scratchpad → EXIT signals TOP
+//   4. TOP reads results, decides continue or stop
+//   5. TOP sends run_iter event to root → root propagates down to all children
+//   6. To stop: TOP sends -1 → all threads yield_terminate
+//
+// =============================================================================
+
+#include "kcore.udwh"
+
+// =============================================================================
+// THREAD: KCORE_MULTI_main
+// =============================================================================
+// The root entry point, always runs on lane 0. Acts as the interface between
+// the TOP (host) core and the UpDown accelerator tree.
+//
+// Called by: TOP host via rt->send_event() with event KCORE_MULTI_main__start
+// Children: One of the two splitter threads (8-way or binary)
+//
+// Lifecycle:
+//   1. TOP sends 'start' event → builds args, dispatches to a splitter
+//   2. Splitter tree completes → 'done' event fires, writes results to
+//      scratchpad for TOP to read, signals EXIT
+//   3. TOP sends 'run_iter' event → forwards to child splitter for next iter
+//   4. TOP sends 'run_iter' with -1 → propagates stop, yield_terminate
+//
+thread KCORE_MULTI_main {
+  // Thread-local: stores the event word for reaching the child splitter's
+  // run_iter event on subsequent iterations. Set in 'done', used in 'run_iter'.
+  unsigned long child_event;
+
+  // -------------------------------------------------------------------------
+  // EVENT: start
+  // -------------------------------------------------------------------------
+  // Called by: TOP host (first event sent to UpDown)
+  // Purpose:  Initialize the computation tree for the first iteration.
+  //           Packs all graph parameters into args buffer and dispatches
+  //           to either the 8-way splitter (>2048 lanes) or binary splitter.
+  //
+  // Parameters:
+  //   N         — number of vertices in the graph
+  //   M         — number of edges in the graph
+  //   graph_    — DRAM pointer to the vertex array (array of vertex_t)
+  //   num_lanes — total number of UpDown lanes to use
+  //
+  // Sends to: split_vertexsKCORE_MULTI::start or split_vertexs2KCORE_MULTI::start
+  // Continuation: done (when the splitter tree finishes, come back here)
+  //
+  event start(unsigned long N, unsigned long M, unsigned long *graph_,
+              unsigned long num_lanes) {
+    print("start KCORE_MULTI: start iter, N = %lu, M = %lu", N, M);
+    // Build the 9-word argument array for the splitter's start event:
+    //   args[0] = N (number of vertices in this sub-range)
+    //   args[1] = M (number of edges in this sub-range)
+    //   args[2] = vertexs_ (pointer to start of vertex sub-array)
+    //   args[3] = graph_ (pointer to FULL vertex array base, for lookups)
+    //   args[4] = 0 (unused / min_label)
+    //   args[5] = 0 (edges_to_left_of_start: cumulative edge offset)
+    //   args[6] = num_lanes (in FAKE_SPREAD encoding)
+    //   args[7] = 0 (lane_start: starting lane ID for this sub-range)
+    //   args[8] = 0 (depth: recursion depth, starts at 0)
+    unsigned long *local args = args_scratch_space;
+    args[0] = N;
+    args[1] = M;
+    args[2] = graph_;
+    args[3] = graph_;
+    args[4] = 0; // min_label
+    args[5] = 0; // edges_to_left_of_start
+    args[6] = FAKE_SPREAD_LANES(num_lanes);
+    args[7] = 0; // lane_start
+    args[8] = 0;
+
+    // Choose splitter based on lane count:
+    //   >2048 lanes → 8-way splitter (faster fan-out for very large configs)
+    //   ≤2048 lanes → binary splitter (simpler, sufficient for smaller configs)
+    unsigned long evwWord;
+    if (num_lanes > SWITCH_TO_SPLIT_2) {
+      evwWord = evw_new(0, split_vertexsKCORE_MULTI::start);
+    } else {
+      evwWord = evw_new(0, split_vertexs2KCORE_MULTI::start);
+    }
+    // Set continuation so when the splitter finishes, it calls our 'done' event
+    unsigned long continuationWord = evw_update_event(CEVNT, done);
+    send_event(evwWord, args, 9, continuationWord);
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: done
+  // -------------------------------------------------------------------------
+  // Called by: The child splitter tree (via CCONT) when one iteration completes.
+  // Purpose:  Store results in scratchpad for TOP to read, then signal EXIT.
+  //
+  // Parameters (from splitter's completion message):
+  //   unused    — not used
+  //   max_delta — maximum score change across all vertices this iteration
+  //   child     — event word to reach the child's run_iter for next iteration
+  //
+  // After this event: TOP reads scratchpad and decides next action.
+  //   - args[0] at scratchpad offset 1664 = max_delta
+  //   - args[2] at scratchpad offset 1680 = TID (this thread's ID, for run_iter)
+  //
+  event done(unsigned long unused, long max_delta, unsigned long child) {
+    print("end KCORE_MULTI: done iter, max_delta = %ld, child = %lx", max_delta, child);
+    // Write results to scratchpad where TOP will read them
+    unsigned long *local args = args_scratch_space;
+    args[0] = max_delta;      // TOP reads this as the max score change
+    args[2] = TID;            // TOP uses this as the thread ID for run_iter
+    // Save child's run_iter event word for subsequent iterations
+    child_event = child;
+    // Signal TOP that this iteration is complete
+    EXIT;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: run_iter
+  // -------------------------------------------------------------------------
+  // Called by: TOP host on each subsequent iteration (after the first).
+  // Purpose:  Either propagate the "run next iteration" signal down the tree,
+  //           or propagate a "stop" signal (-1) to terminate all threads.
+  //
+  // Parameters:
+  //   stop_if_neg_1 — 0 to run another iteration, -1 to stop and clean up
+  //
+  // If stopping: propagates -1 to child, writes EXIT, yield_terminate.
+  // If continuing: sends run_iter to child with continuation back to 'done'.
+  //
+  event run_iter(long stop_if_neg_1) {
+    // STOP case: propagate termination down the tree
+    if (stop_if_neg_1 == -1) {
+      print("stopping");
+      if (child_event) {
+        // Forward the stop signal to the child splitter
+        send_event(child_event, stop_if_neg_1, IGNRCONT);
+      }
+      EXIT;
+      yield_terminate;  // Destroy this thread
+    }
+    // CONTINUE case: trigger next iteration in the child tree
+    print("start KCORE_MULTI: run iter, child_event = %lx", child_event);
+    unsigned long continuationWord = evw_update_event(CEVNT, done);
+    if (child_event) {
+      // Forward run_iter to the child; when child finishes, call our 'done'
+      send_event(child_event, stop_if_neg_1, continuationWord);
+    } else {
+      // Edge case: no child (empty graph region). Immediately signal done.
+      print("empty case: done iter");
+      unsigned long *local args = args_scratch_space;
+      args[0] = 0;
+      args[1] = 0;
+      args[2] = TID;
+      EXIT;
+    }
+  }
+}
+
+// =============================================================================
+// THREAD: split_vertexsKCORE_MULTI  (8-way splitter)
+// =============================================================================
+// Splits a range of N vertices across up to 8 child sub-tasks, allocating
+// lanes proportional to edge count. Used when num_lanes > SWITCH_TO_SPLIT_2.
+//
+// Called by: KCORE_MULTI_main::start or recursively by itself
+// Children: Up to 8 children, each either:
+//   - Another split_vertexsKCORE_MULTI (recursive, if many lanes remain)
+//   - split_vertexs2KCORE_MULTI (binary splitter, if fewer lanes)
+//   - process_vertexs_on_one_lane_KCORE_MULTI (if only 1 lane for child)
+//   - process_vertex_KCORE_MULTI (if only 1 vertex, multiple lanes)
+//
+// Strategy: Divides N vertices into 8 equal-sized chunks (N/8 each).
+//   Reads the edges_before field of 7 boundary vertices to determine how
+//   many edges fall in each chunk. Then allocates lanes proportionally:
+//     lanes_for_child_i = num_lanes * (work_i / total_work)
+//   where work_i = VERTEX_WORK_FACTOR * N_chunk + edges_in_chunk.
+//   The 8th (last) child gets all remaining lanes and vertices.
+//
+// On subsequent iterations: run_iter fans out to all 8 children, collects
+//   their done events, aggregates max_delta, and reports up.
+//
+thread split_vertexsKCORE_MULTI {
+
+  unsigned long N;          // Total vertices in this sub-range
+  unsigned long counter;    // Multi-purpose: counts pending responses from children
+
+  long M;                   // Total edges in this sub-range
+  unsigned long num_lanes;  // Lanes allocated to this sub-range (FAKE_SPREAD encoded)
+  unsigned long lane_start; // Starting lane ID for this sub-range (FAKE_SPREAD encoded)
+
+  unsigned long *vertexs;   // DRAM pointer to start of vertex sub-array
+  unsigned long *graph;     // DRAM pointer to FULL graph vertex array (for lookups)
+  unsigned long edges_to_left_of_start; // Cumulative edges before first vertex in range
+  unsigned long depth;      // Recursion depth (for FORCE_FIRST_NODE logic)
+
+  long max_delta;           // Tracks maximum score change across all children
+
+  // -------------------------------------------------------------------------
+  // EVENT: start
+  // -------------------------------------------------------------------------
+  // Called by: KCORE_MULTI_main::start or recursive split from parent
+  // Purpose:  Receive a vertex range and lane budget, then split into
+  //           up to 8 sub-tasks. Handles special cases (empty, single vertex,
+  //           single lane, ≤8 vertices) before the general 8-way split.
+  //
+  // Parameters (9-word argument vector):
+  //   N_                        — number of vertices in this sub-range
+  //   M_                        — number of edges in this sub-range
+  //   vertexs_                  — DRAM ptr to start of vertex sub-array
+  //   graph_                    — DRAM ptr to full graph vertex array
+  //   unused                    — (not used)
+  //   edges_to_left_of_start_   — cumulative edges before this sub-range
+  //   num_lanes_                — lanes for this sub-range (FAKE_SPREAD encoded)
+  //   lane_start_               — starting lane ID (FAKE_SPREAD encoded)
+  //   depth_                    — current recursion depth
+  //
+  // M is the number of edges in my region
+  event start(unsigned long N_, long M_, unsigned long *vertexs_,
+              unsigned long *graph_, unsigned long unused,
+              unsigned long edges_to_left_of_start_, unsigned long num_lanes_,
+              unsigned long lane_start_, unsigned long depth_) {
+
+    // BASE CASE 1: Empty sub-range — nothing to do, report done immediately
+    if (N_ == 0 || M_ == 0) {
+      // Send completion with zero max_delta and no child event
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+
+    // BASE CASE 2: Only 1 lane — fall through to sequential single-lane processing
+    // Forward all args to process_vertexs_on_one_lane_KCORE_MULTI::start
+    // send_ops forwards 5 operands starting from N_ (N_, M_, vertexs_, graph_, unused)
+    if (num_lanes_ <= 1) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_vertexs_on_one_lane_KCORE_MULTI::start);
+      send_ops(evwWord, N_, 5, CCONT);
+      yield;
+    }
+
+    depth = depth_ + 1;
+    num_lanes = num_lanes_;
+    lane_start = lane_start_;
+    graph = graph_;
+
+    // BASE CASE 3: Single vertex with multiple lanes — read its data and
+    // dispatch to process_vertex_KCORE_MULTI which splits edges across lanes
+    if (N_ == 1) {
+      // Read first 5 words of the vertex struct (dests, degree, edges_before,
+      // vertex_id, scratch1) and continue at after_load_vertex_offsets_single
+      send_dram_read(vertexs_, 5, after_load_vertex_offsets_single);
+      yield;
+    }
+    M = M_;
+
+    N = N_;
+
+    unsigned long *local ptr;
+    local_child_data_ptr(ptr);
+    max_delta = 0;
+
+    vertexs = vertexs_;
+
+    // BASE CASE 4: ≤8 vertices — treat each vertex as its own child.
+    // Read each vertex's struct from DRAM. Each read triggers
+    // after_load_vertex_offsets_bottom<i> which dispatches that vertex
+    // to process_vertex_KCORE_MULTI with a proportional lane allocation.
+    // Children that don't exist (N < 8) get their child_event set to 0.
+    if (N <= 8) {
+      send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom0);
+      vertexs = vertexs + vertex_size;
+      send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom1);
+      if (N > 2) {
+        vertexs = vertexs + vertex_size;
+        send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom2);
+        if (N > 3) {
+          vertexs = vertexs + vertex_size;
+          send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom3);
+          if (N > 4) {
+            vertexs = vertexs + vertex_size;
+            send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom4);
+            if (N > 5) {
+              vertexs = vertexs + vertex_size;
+              send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom5);
+              if (N > 6) {
+                vertexs = vertexs + vertex_size;
+                send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom6);
+                if (N > 7) {
+                  vertexs = vertexs + vertex_size;
+                  send_dram_read(vertexs, 5, after_load_vertex_offsets_bottom7);
+                } else {
+                  ref_child_event(ptr, 7) = 0;
+                }
+              } else {
+                ref_child_event(ptr, 6) = 0;
+                ref_child_event(ptr, 7) = 0;
+              }
+            } else {
+              ref_child_event(ptr, 5) = 0;
+              ref_child_event(ptr, 6) = 0;
+              ref_child_event(ptr, 7) = 0;
+            }
+          } else {
+            ref_child_event(ptr, 4) = 0;
+            ref_child_event(ptr, 5) = 0;
+            ref_child_event(ptr, 6) = 0;
+            ref_child_event(ptr, 7) = 0;
+          }
+        } else {
+          ref_child_event(ptr, 3) = 0;
+          ref_child_event(ptr, 4) = 0;
+          ref_child_event(ptr, 5) = 0;
+          ref_child_event(ptr, 6) = 0;
+          ref_child_event(ptr, 7) = 0;
+        }
+      } else {
+        ref_child_event(ptr, 2) = 0;
+        ref_child_event(ptr, 3) = 0;
+        ref_child_event(ptr, 4) = 0;
+        ref_child_event(ptr, 5) = 0;
+        ref_child_event(ptr, 6) = 0;
+        ref_child_event(ptr, 7) = 0;
+      }
+      // Wait for N-1 more responses (first vertex already read)
+      // (counter tracks how many after_load_vertex_offsets_bottom<i> events
+      //  we still expect before all vertices have been dispatched)
+      counter = N - 1;
+      yield;
+    }
+
+    // GENERAL CASE: N > 8 — perform 8-way split.
+    // Divide the N vertices into 8 chunks of size N/8 each (last chunk
+    // gets the remainder). To determine how many edges are in each chunk,
+    // read the edges_before field of the 7 boundary vertices (at positions
+    // N/8, 2*N/8, ... 7*N/8). The edges_before field is a prefix sum that
+    // tells us the cumulative edge count up to that vertex.
+    //
+    // shift = N/8 * vertex_size = byte offset between boundary vertices
+    // We read from vertexs + shift + 16: the +16 is because edges_before
+    // is at offset 16 within vertex_t (3rd field). We only need 5 words
+    // starting at offset 16 to get edges_before and subsequent fields.
+    // Actually we read the full 5 words at the vertex boundary address,
+    // but the continuation event only uses edges_before_vertex.
+    edges_to_left_of_start = edges_to_left_of_start_;
+
+    unsigned long shift = (N_ >> 3);       // shift = N / 8 (vertices per chunk)
+    shift = shift * vertex_size;           // convert to bytes
+    // Read boundary vertex at position N/8 (offset +16 to get edges_before field)
+    unsigned long *v = vertexs + shift + 16;
+    send_dram_read(v, 5, after_load_vertex_offsets_0);
+    v = v + shift;  // boundary at 2*N/8
+    send_dram_read(v, 5, after_load_vertex_offsets_1);
+    v = v + shift;  // boundary at 3*N/8
+    send_dram_read(v, 5, after_load_vertex_offsets_2);
+    v = v + shift;  // boundary at 4*N/8
+    send_dram_read(v, 5, after_load_vertex_offsets_3);
+    v = v + shift;  // boundary at 5*N/8
+    send_dram_read(v, 5, after_load_vertex_offsets_4);
+    v = v + shift;  // boundary at 6*N/8
+    send_dram_read(v, 5, after_load_vertex_offsets_5);
+    v = v + shift;  // boundary at 7*N/8
+    send_dram_read(v, 5, after_load_vertex_offsets_6);
+    // Wait for 7 boundary reads (counter counts down from 6 to 0)
+    // Note: we read 7 boundaries to define 8 chunks.
+    // When all 7 arrive, after_load_vertex_offsets_<i> dispatches all 8 children.
+    counter = 6;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: after_load_vertex_offsets_single
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read response when N==1 (single vertex case)
+  // Purpose:  We have exactly 1 vertex to process with multiple lanes.
+  //           Dispatch it to process_vertex_KCORE_MULTI which can split
+  //           the edges of that single vertex across multiple lanes.
+  //
+  // Parameters (from DRAM read of vertex struct):
+  //   edges             — pointer to neighbor list
+  //   degree            — number of edges
+  //   edges_before_vertex — (not used here)
+  //   vertex_id_loaded  — vertex ID
+  //   curr_score        — current score (from scratch1)
+  //
+  event after_load_vertex_offsets_single(
+      unsigned long *edges, unsigned long degree,
+      unsigned long edges_before_vertex, unsigned long vertex_id_loaded,
+      unsigned long curr_score) {
+    // Deleted vertex (degree 0) — nothing to compute, report done
+    if (degree == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+
+    // Single vertex with degree > 0 — dispatch to process_vertex_KCORE_MULTI
+    // which handles splitting a single vertex's edges across multiple lanes.
+    // Build 9-word args: edges, degree, vertex_id, graph, unused, curr_score,
+    //   num_lanes, lane_start, depth
+    unsigned long *local args = args_scratch_space;
+    args[0] = edges;
+    args[1] = degree;
+    args[2] = vertex_id_loaded;
+    args[3] = graph;
+    args[4] = 0; // unused
+    args[5] = curr_score;
+    args[6] = num_lanes;
+    args[7] = lane_start;
+    args[8] = depth;
+    // Target the starting lane for this sub-range
+    unsigned long evwWord;
+    if (1) {
+      int id = FAKE_COMBINE_LANES(lane_start);
+      evwWord = evw_new(id, process_vertex_KCORE_MULTI::start);
+    }
+    // Forward our continuation (CCONT) so the vertex processor reports
+    // back to whoever called us
+    send_event(evwWord, args, 9, CCONT);
+    yield_terminate;
+  }
+
+  // -------------------------------------------------------------------------
+  // MACRO: after_load_vertex_offsets_bottom_event(num)
+  // -------------------------------------------------------------------------
+  // Generates events after_load_vertex_offsets_bottom0..7 for the ≤8 vertex
+  // case. Each event fires when a vertex's DRAM read completes.
+  //
+  // Called by: DRAM read response (from the N≤8 case in start)
+  // Purpose:  For each vertex, allocate a proportional number of lanes
+  //           based on its degree relative to remaining edges (M), then
+  //           dispatch to process_vertex_KCORE_MULTI to process that vertex.
+  //
+  // Lane allocation: lanes_for_worker = num_lanes * degree / M
+  //   After dispatching, adjust lane_start, num_lanes, and M for the next vertex.
+  //   Each vertex's done event is done_<num>.
+  //
+  // Parameters (from DRAM read of vertex struct):
+  //   edges, degree, edges_before_vertex, vertex_id_loaded, curr_score
+  //
+#define after_load_vertex_offsets_bottom_event(num)                            \
+  event after_load_vertex_offsets_bottom##num(                                 \
+      unsigned long *edges, unsigned long degree,                              \
+      unsigned long edges_before_vertex, unsigned long vertex_id_loaded,       \
+      unsigned long curr_score) {                                              \
+    /* Deleted vertex: skip it, mark child as empty, decrement counter */      \
+    if (degree == 0) {                                                         \
+      counter = counter - 1;                                                   \
+      M = M - degree;                                                          \
+      set_child_event(0, num);                                                 \
+      yield;                                                                   \
+    }                                                                          \
+    /* Allocate lanes proportional to this vertex's degree vs remaining M */   \
+    unsigned long *local args = args_scratch_space;                            \
+    unsigned long lanes_for_worker = num_lanes * degree;                       \
+    lanes_for_worker = lanes_for_worker / M;                                   \
+    /* Build 9-word args for process_vertex_KCORE_MULTI::start */              \
+    args[0] = edges;                                                           \
+    args[1] = degree;                                                          \
+    args[2] = vertex_id_loaded;                                                \
+    args[3] = graph;                                                           \
+    args[4] = 0; /*unused*/                                                    \
+    args[5] = curr_score;                                                      \
+    args[6] = lanes_for_worker;                                                \
+    args[7] = lane_start;                                                      \
+    args[8] = depth;                                                           \
+    /* Dispatch to process_vertex_KCORE_MULTI on the assigned lane */          \
+    if (1) {                                                                   \
+      unsigned long evwWord;                                                   \
+      if (1) {                                                                 \
+        int id = FAKE_COMBINE_LANES(lane_start);                               \
+        evwWord = evw_new(id, process_vertex_KCORE_MULTI::start);            \
+      }                                                                        \
+      /* Continuation: when vertex finishes, call our done_<num> event */      \
+      send_event(evwWord, args, 9, evw_update_event(CEVNT, done_##num));       \
+    }                                                                          \
+    /* Advance lane_start and reduce remaining lanes/edges for next vertex */  \
+    lane_start = lane_start + lanes_for_worker;                                \
+    num_lanes = num_lanes - lanes_for_worker;                                  \
+    M = M - degree;                                                            \
+  }
+
+  // clang-format off
+      after_load_vertex_offsets_bottom_event(0)
+      after_load_vertex_offsets_bottom_event(1)
+      after_load_vertex_offsets_bottom_event(2)
+      after_load_vertex_offsets_bottom_event(3)
+      after_load_vertex_offsets_bottom_event(4)
+      after_load_vertex_offsets_bottom_event(5)
+      after_load_vertex_offsets_bottom_event(6)
+      after_load_vertex_offsets_bottom_event(7)
+      // clang-format on
+
+      // Placeholder event required by UDWeave to separate macro-generated events
+      event
+      ignore() {}
+
+  // -------------------------------------------------------------------------
+  // MACRO: after_load_vertex_offsets_event_process_not_last_child(num)
+  // -------------------------------------------------------------------------
+  // Helper macro used inside after_load_vertex_offsets_event to dispatch
+  // one of the first 7 children (children 0-6) of the 8-way split.
+  //
+  // At this point, set_child_event stored the edges_before value for boundary
+  // vertex #num. This macro computes num_edges for this child's chunk,
+  // allocates lanes proportionally, dispatches to a child splitter, and
+  // advances the running totals (edges_to_left_of_start, lane_start, etc.).
+  //
+  // Lane allocation formula:
+  //   lanes_for_child = num_lanes * (VERTEX_WORK_FACTOR * N_shifted + num_edges)
+  //                     / (VERTEX_WORK_FACTOR * N + M)
+  //   If that rounds to 0, try with 4x scaling; if still non-zero → give 1 lane.
+  //
+  // Dispatches to: split_vertexsKCORE_MULTI::start (if many lanes) or
+  //                split_vertexs2KCORE_MULTI::start (if fewer lanes)
+  //
+#define after_load_vertex_offsets_event_process_not_last_child(num)            \
+  if (1) {                                                                     \
+    /* Retrieve the edges_before value we stored for boundary #num */          \
+    long num_edges;                                                            \
+    get_child_event(num_edges, num);                                           \
+    /* num_edges = edges in this child's chunk (from left boundary to here) */ \
+    num_edges = num_edges - edges_to_left_of_start;                            \
+    ASSERT_UDW_NON_NEGATIVE(num_edges);                                        \
+    /* Compute proportional lanes: work = vertex_overhead + edge_count */      \
+    unsigned long lanes_for_child =                                            \
+        (VERTEX_WORK_FACTOR * N_shifted) + num_edges;                          \
+    if (1) {                                                                   \
+      /* lanes_for_child = num_lanes * work_for_child / total_remaining_work */\
+      lanes_for_child = (num_lanes * lanes_for_child);                         \
+      lanes_for_child = lanes_for_child / counter;                             \
+      /* If rounded to 0, try 4x upscaling to see if it deserves 1 lane */    \
+      if (lanes_for_child == 0) {                                              \
+        lanes_for_child = (VERTEX_WORK_FACTOR * N_shifted) + num_edges;        \
+        lanes_for_child = 4 * lanes_for_child;                                 \
+        lanes_for_child = (num_lanes * lanes_for_child);                       \
+        lanes_for_child = lanes_for_child / counter;                           \
+        if (lanes_for_child) {                                                 \
+          lanes_for_child = 1;                                                 \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+    /* Build args and dispatch child */                                        \
+    if (1) {                                                                   \
+      if (1) {                                                                 \
+        args[1] = num_edges;            /* M for this child */                 \
+        args[2] = vertexs;              /* vertex sub-array start */           \
+        args[5] = edges_to_left_of_start; /* cumulative edges before */        \
+        args[6] = lanes_for_child;      /* lanes allocated */                  \
+        args[7] = lane_start;           /* starting lane */                    \
+      }                                                                        \
+      int id = FAKE_COMBINE_LANES(lane_start);                                 \
+      /* For early recursion levels, spread across first 2048 lanes */         \
+      if (depth < FORCE_FIRST_NODE) {                                          \
+        id = id % 2048;                                                        \
+      }                                                                        \
+      /* Choose 8-way or binary splitter based on lane count */                \
+      counter = FAKE_SPREAD_LANES(SWITCH_TO_SPLIT_2);                          \
+      if (lanes_for_child > counter) {                                         \
+        counter = evw_new(id, start);   /* recurse 8-way */                    \
+      } else {                                                                 \
+        counter = evw_new(id, split_vertexs2KCORE_MULTI::start);             \
+      }                                                                        \
+      send_event(counter, args, 9, evw_update_event(CEVNT, done_##num));       \
+    }                                                                          \
+    /* Advance running totals for the next child */                            \
+    edges_to_left_of_start = edges_to_left_of_start + num_edges;               \
+    lane_start = lane_start + lanes_for_child;                                 \
+    vertexs = vertexs + (N_shifted * vertex_size);                             \
+    M = M - num_edges;                                                         \
+    N = N - N_shifted;                                                         \
+    ASSERT_UDW_NON_ZERO(M);                                                    \
+    ASSERT_UDW_NON_ZERO(N);                                                    \
+    num_lanes = num_lanes - lanes_for_child;                                   \
+    counter = (VERTEX_WORK_FACTOR * N) + M;                                    \
+  }
+
+  // -------------------------------------------------------------------------
+  // MACRO: after_load_vertex_offsets_event(num)
+  // -------------------------------------------------------------------------
+  // Generates events after_load_vertex_offsets_0..6 for the general 8-way
+  // split case (N > 8). Each event fires when a boundary vertex's DRAM read
+  // returns the edges_before field.
+  //
+  // Called by: DRAM read response for boundary vertex at position (num+1)*N/8
+  // Purpose:  Store the edges_before value. When all 7 boundary reads have
+  //           arrived (counter reaches 0), dispatch all 8 children.
+  //
+  // The counter counts down from 6 to 0 as boundary reads arrive (in any
+  // order). When counter==0, we have all 7 boundary values and can compute
+  // the edge distribution across all 8 chunks. Then:
+  //   - Children 0-6: dispatched via process_not_last_child macro
+  //   - Child 7 (last): gets ALL remaining vertices, edges, and lanes
+  //
+#define after_load_vertex_offsets_event(num)                                   \
+  event after_load_vertex_offsets_##num(unsigned long edges_before_vertex) {   \
+    /* Store this boundary's edges_before for later use */                     \
+    set_child_event(edges_before_vertex, num);                                 \
+    /* When all 7 boundaries have arrived, dispatch all 8 children */          \
+    if (counter == 0) {                                                        \
+      /*TODO(wheatman) right now uneven splits give all extra lanes and        \
+       * vertices to the last one, do something better */                      \
+      /* counter = total_work = VERTEX_WORK_FACTOR * N + M (used as denominator */\
+      /* for proportional lane allocation in process_not_last_child) */         \
+      counter = (VERTEX_WORK_FACTOR * N) + M;                                  \
+      /* Set up shared args fields: graph ptr, unused, depth */                \
+      unsigned long *local args = args_scratch_space;                          \
+      args[3] = graph;                                                         \
+      args[4] = 0; /* unused*/                                                 \
+      args[8] = depth;                                                         \
+      /* N_shifted = N/8 = vertices per chunk (for children 0-6) */            \
+      unsigned long N_shifted = N >> 3;                                        \
+      args[0] = N_shifted;                                                     \
+      /* Dispatch children 0-6, each getting N/8 vertices */                   \
+      /* Each call updates: edges_to_left_of_start, lane_start, vertexs, M, N */\
+      if (1) {                                                                 \
+        after_load_vertex_offsets_event_process_not_last_child(0);             \
+        after_load_vertex_offsets_event_process_not_last_child(1);             \
+        after_load_vertex_offsets_event_process_not_last_child(2);             \
+        after_load_vertex_offsets_event_process_not_last_child(3);             \
+        after_load_vertex_offsets_event_process_not_last_child(4);             \
+        after_load_vertex_offsets_event_process_not_last_child(5);             \
+        after_load_vertex_offsets_event_process_not_last_child(6);             \
+      }                                                                        \
+      /* Child 7 (last child): gets ALL remaining vertices, edges, lanes */    \
+      if (1) {                                                                 \
+        if (1) {                                                               \
+          if (1) {                                                             \
+            args[0] = N;            /* remaining vertices */                   \
+            args[1] = M;            /* remaining edges */                      \
+            args[2] = vertexs;      /* remaining vertex array start */         \
+            args[5] = edges_to_left_of_start;                                  \
+            ASSERT_UDW_NON_NEGATIVE(num_lanes);                                \
+            ASSERT_UDW_NON_ZERO(num_lanes);                                    \
+            ASSERT_UDW_NON_ZERO(M);                                            \
+            args[6] = num_lanes;    /* all remaining lanes */                  \
+            args[7] = lane_start;                                              \
+          }                                                                    \
+          int id = FAKE_COMBINE_LANES(lane_start);                             \
+          if (depth < FORCE_FIRST_NODE) {                                      \
+            id = id % 2048;                                                    \
+          }                                                                    \
+          /* Choose 8-way or binary splitter for last child */                 \
+          counter = FAKE_SPREAD_LANES(SWITCH_TO_SPLIT_2);                      \
+          if (num_lanes > counter) {                                           \
+            counter = evw_new(id, start);                                      \
+          } else {                                                             \
+            counter = evw_new(id, split_vertexs2KCORE_MULTI::start);         \
+          }                                                                    \
+          send_event(counter, args, 9, evw_update_event(CEVNT, done_7));       \
+        }                                                                      \
+      }                                                                        \
+      /* Now wait for all 8 children to complete (counter = 7, counts down) */ \
+      counter = 7;                                                             \
+      yield;                                                                   \
+    }                                                                          \
+    /* Not all boundaries arrived yet — decrement and wait for more */         \
+    counter = counter - 1;                                                     \
+  }
+
+  // clang-format off
+    after_load_vertex_offsets_event(0)
+    after_load_vertex_offsets_event(1)
+    after_load_vertex_offsets_event(2)
+    after_load_vertex_offsets_event(3)
+    after_load_vertex_offsets_event(4)
+    after_load_vertex_offsets_event(5)
+    after_load_vertex_offsets_event(6)
+      // clang-format on
+
+      event
+      ignore4() {}
+
+  // -------------------------------------------------------------------------
+  // MACRO: done_event(num) — generates done_0..done_7
+  // -------------------------------------------------------------------------
+  // Called by: Child splitter/processor when it completes one iteration.
+  // Purpose:  Collect results from each child. Stores the child's run_iter
+  //           event word for subsequent iterations. Tracks max_delta (the
+  //           largest score change across all children). When all children
+  //           have reported (counter reaches 0), report our own completion
+  //           to our parent via CCONT.
+  //
+  // Parameters (from child's completion message):
+  //   unused            — not used
+  //   partial_max_delta — max score change from this child's sub-tree
+  //   new_child         — event word to reach this child's run_iter next time
+  //
+  // Return to parent: (unused=0, max_delta, run_iter_event_word)
+  //   The 3rd operand is our own run_iter event word so the parent can
+  //   trigger subsequent iterations on us.
+  //
+#define done_event(num)                                                        \
+  event done_##num(unsigned long unused, long partial_max_delta,               \
+                   unsigned long new_child) {                                  \
+    /* Save child's run_iter event for next iteration */                       \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    ref_child_event(child_data, num) = new_child;                              \
+    /* Update max_delta if this child's delta is larger */                     \
+    if(partial_max_delta > max_delta) {                                        \
+      max_delta = partial_max_delta;                                           \
+    }                                                                          \
+    /* If this is the last child to report, send results to parent */          \
+    if (counter == 0) {                                                        \
+      send_event(CCONT, 0 /* unused */, max_delta,                             \
+                 evw_update_event(CEVNT, run_iter), IGNRCONT);                 \
+      counter = -1;                                                            \
+      yield;                                                                   \
+    }                                                                          \
+    counter = counter - 1;                                                     \
+  }
+  // clang-format off
+    done_event(0) 
+    done_event(1) 
+    done_event(2)
+    done_event(3) 
+    done_event(4) 
+    done_event(5)
+    done_event(6)
+    done_event(7)
+      // clang-format on
+
+      event
+      ignore5() {}
+
+  // -------------------------------------------------------------------------
+  // EVENT: run_iter (8-way splitter)
+  // -------------------------------------------------------------------------
+  // Called by: Parent (KCORE_MULTI_main or another splitter) on subsequent
+  //           iterations, OR to signal termination.
+  // Purpose:  Fan out the run_iter (or stop) signal to all 8 children.
+  //           For each non-null child, send the signal and set up done_<i>
+  //           as the continuation. Count active children for the done barrier.
+  //
+  // Parameters:
+  //   stop_if_neg_1 — 0 to continue, -1 to stop and clean up
+  //
+  event run_iter(long stop_if_neg_1) {
+    unsigned long *local child_data;
+    local_child_data_ptr(child_data);
+    // Count active children and forward run_iter to each
+    counter = 0;
+    if (ref_child_event(child_data, 0) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 0), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_0));
+    }
+    if (ref_child_event(child_data, 1) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 1), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_1));
+    }
+    if (ref_child_event(child_data, 2) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 2), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_2));
+    }
+    if (ref_child_event(child_data, 3) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 3), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_3));
+    }
+    if (ref_child_event(child_data, 4) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 4), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_4));
+    }
+    if (ref_child_event(child_data, 5) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 5), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_5));
+    }
+    if (ref_child_event(child_data, 6) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 6), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_6));
+    }
+    if (ref_child_event(child_data, 7) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 7), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_7));
+    }
+    // If stopping, we already forwarded -1 to all children; just terminate
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    // If no active children, report done immediately
+    if (counter == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+    // Set up done barrier: counter-1 because the last done_<i> will fire
+    // the completion when counter reaches 0
+    counter = counter - 1;
+    max_delta = 0;
+    yield;
+  }
+}  // end thread split_vertexsKCORE_MULTI
+
+// =============================================================================
+// THREAD: split_vertexs2KCORE_MULTI  (binary splitter)
+// =============================================================================
+// Splits a range of N vertices into two halves (left and right), allocating
+// lanes proportional to edge count. Used when num_lanes ≤ SWITCH_TO_SPLIT_2.
+//
+// Called by: KCORE_MULTI_main::start, split_vertexsKCORE_MULTI, or recursively
+// Children: 2 children (left half and right half), each dispatched to:
+//   - split_vertexs2KCORE_MULTI::start (recursive binary split, if >1 lane)
+//   - process_vertexs_on_one_lane_KCORE_MULTI::start (if 1 lane)
+//   - process_vertex_KCORE_MULTI::start (if right half has 1 vertex)
+//   - process_vertex_on_one_lane_KCORE_MULTI::start (single vertex, 1 lane)
+//
+// IMPORTANT register reuse: After the initial split, num_lanes_or_left_child
+// and lane_start_or_right_child are repurposed to store the left and right
+// children's run_iter event words (for subsequent iterations).
+//
+thread split_vertexs2KCORE_MULTI {
+
+  unsigned long N;             // Vertices in this sub-range
+  long M;                      // Edges in this sub-range
+  unsigned long counter;       // Counts pending child completions (0 or 1)
+
+  // Dual-purpose registers (saves scarce thread-local register slots):
+  //   During start: num_lanes and lane_start for this sub-range
+  //   After first iteration: left_child and right_child run_iter event words
+  unsigned long num_lanes_or_left_child;
+  unsigned long lane_start_or_right_child;
+
+  unsigned long *vertexs;      // DRAM pointer to vertex sub-array start
+  unsigned long *graph;        // DRAM pointer to full graph vertex array
+  unsigned long edges_to_left_of_start; // Cumulative edges before this range
+  unsigned long depth;         // Recursion depth
+
+  long current_max_distance;   // Aggregated max score change from children
+
+  // -------------------------------------------------------------------------
+  // EVENT: start
+  // -------------------------------------------------------------------------
+  // Called by: Parent splitter or KCORE_MULTI_main
+  // Purpose:  Split N vertices into two halves. Read the midpoint vertex's
+  //           edges_before field to determine edge distribution, then
+  //           dispatch left and right children with proportional lanes.
+  //
+  // Parameters: Same 9-word vector as split_vertexsKCORE_MULTI::start
+  //
+  // M is the number of edges in my region
+
+  event start(unsigned long N_, long M_, unsigned long *vertexs_,
+              unsigned long *graph_, unsigned long unused,
+              unsigned long edges_to_left_of_start_, unsigned long num_lanes_,
+              unsigned long lane_start_, unsigned long depth_) {
+
+    // print("N: %lu, M: %lu, edgesLeftOfStart %lu, numLanes: %lu, laneStart: %lu, depth: %lu", N_, M_, edges_to_left_of_start_, num_lanes_, lane_start_, depth_);
+    ASSERT_UDW_NON_NEGATIVE(M_);
+
+    // BASE CASE 1: Empty — report done immediately
+    if (N_ == 0 || M_ == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+
+    // BASE CASE 2: Only 1 lane — fall through to single-lane processing
+    if (num_lanes_ <= 1) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_vertexs_on_one_lane_KCORE_MULTI::start);
+      send_ops(evwWord, N_, 5, CCONT);
+      yield;
+    }
+    depth = depth_ + 1;
+    num_lanes_or_left_child = num_lanes_;
+    lane_start_or_right_child = lane_start_;
+    graph = graph_;
+
+    // BASE CASE 3: Single vertex with multiple lanes — dispatch directly
+    if (N_ == 1) {
+      send_dram_read(vertexs_, 5, after_load_vertex_offsets_single);
+      yield;
+    }
+
+    M = M_;
+
+    N = N_;
+
+    vertexs = vertexs_;
+
+    edges_to_left_of_start = edges_to_left_of_start_;
+
+    // Read the midpoint vertex (at position N/2) to get its edges_before.
+    // This tells us how many edges are in the left half vs right half.
+    unsigned long shift = (N_ >> 1);       // N/2
+    shift = shift * vertex_size;           // convert to bytes
+    unsigned long *v = vertexs + shift;    // pointer to midpoint vertex
+    send_dram_read(v, 5, after_load_vertex_offsets);
+    counter = 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: after_load_vertex_offsets_single
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read when N==1 (single vertex with multiple lanes)
+  // Purpose:  Dispatch single vertex to process_vertex_KCORE_MULTI
+  //
+  event after_load_vertex_offsets_single(
+      unsigned long *edges, unsigned long degree,
+      unsigned long edges_before_vertex, unsigned long vertex_id_loaded,
+      unsigned long curr_score) {
+    // Deleted vertex — nothing to do
+    if (degree == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+    // Dispatch to process_vertex_KCORE_MULTI (splits edges across lanes)
+    unsigned long *local args = args_scratch_space;
+    args[0] = edges;
+    args[1] = degree;
+    args[2] = vertex_id_loaded;
+    args[3] = graph;
+    args[4] = 0; // unused
+    args[5] = curr_score;
+    args[6] = num_lanes_or_left_child;
+    args[7] = lane_start_or_right_child;
+    args[8] = depth;
+    unsigned long evwWord;
+    if (1) {
+      evwWord = evw_update_event(CEVNT, process_vertex_KCORE_MULTI::start);
+    }
+    send_event(evwWord, args, 9, CCONT);
+    yield;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: after_load_vertex_offsets
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read of the midpoint vertex (at position N/2)
+  // Purpose:  With the midpoint's edges_before, compute edge distribution
+  //           between left and right halves. Allocate lanes proportionally,
+  //           then dispatch both children.
+  //
+  // Parameters (from midpoint vertex DRAM read):
+  //   edges_             — midpoint vertex's neighbor list pointer
+  //   degree_            — midpoint vertex's degree
+  //   edges_before_vertex— cumulative edges up to (but not including) midpoint
+  //   vertex_id_         — midpoint vertex's ID
+  //   curr_score         — midpoint vertex's current score
+  //
+  // The midpoint data is also used if the right half has exactly 1 vertex
+  // (optimization: we already have its data, no need to re-read from DRAM).
+  //
+  event after_load_vertex_offsets(unsigned long *edges_, unsigned long degree_,
+                                  unsigned long edges_before_vertex,
+                                  unsigned long vertex_id_,
+                                  unsigned long curr_score) {
+    // Split work: left half = vertices [0, N/2), right half = [N/2, N)
+
+    unsigned long edges_for_left_half = 0;
+
+    unsigned long lanes_for_left_half = 0;
+    counter = (N >> 1);  // left_half_vertices = N / 2
+    if (1) {
+      // edges_for_left_half = edges in left half
+      //   = midpoint's edges_before - our starting cumulative edges
+      edges_for_left_half = edges_before_vertex - edges_to_left_of_start;
+      // Proportional lane allocation:
+      //   lanes_for_left = num_lanes * (VWF*left_verts + left_edges) / (VWF*N + M)
+      lanes_for_left_half = edges_for_left_half;
+      lanes_for_left_half =
+          lanes_for_left_half + (VERTEX_WORK_FACTOR * counter);
+      lanes_for_left_half = lanes_for_left_half * num_lanes_or_left_child;
+      unsigned long spare = (VERTEX_WORK_FACTOR * N);
+      spare = spare + M;
+      lanes_for_left_half = lanes_for_left_half / spare;
+    }
+
+    // If proportional allocation rounds to 0, try 2x upscaling to see
+    // if the left half deserves at least 1 lane
+    if (lanes_for_left_half == 0) {
+      lanes_for_left_half = VERTEX_WORK_FACTOR * counter;
+      lanes_for_left_half = lanes_for_left_half + edges_for_left_half;
+      // if we are more than half way to needing 1 lane, give it the lane
+      lanes_for_left_half = lanes_for_left_half * num_lanes_or_left_child;
+      lanes_for_left_half = lanes_for_left_half * 2;
+      unsigned long spare = (VERTEX_WORK_FACTOR * N);
+      spare = spare + M;
+      lanes_for_left_half = lanes_for_left_half / spare;
+      if (lanes_for_left_half) {
+        lanes_for_left_half = 1;
+      }
+    }
+
+    // --- DISPATCH LEFT CHILD ---
+    unsigned long *local args = args_scratch_space;
+    args[2] = vertexs;     // left half starts at current vertexs
+    args[3] = graph;
+    args[4] = 0; // unused
+    args[8] = depth;
+    if (1) {
+      if (1) {
+        args[0] = counter;              // N for left child = N/2
+        args[1] = edges_for_left_half;  // M for left child
+        ASSERT_UDW_NON_NEGATIVE(edges_for_left_half);
+
+        args[5] = edges_to_left_of_start;
+        args[6] = lanes_for_left_half;
+        args[7] = lane_start_or_right_child;  // left starts at our lane_start
+      }
+      if (lanes_for_left_half > 1) {
+        // Multiple lanes for left → recurse binary split
+        int id = FAKE_COMBINE_LANES(lane_start_or_right_child);
+        unsigned long envword = evw_new(id, start);
+        send_event(envword, args, 9, evw_update_event(CEVNT, done_left));
+      } else { /* lanes_for_left_half == 1 → single-lane processing */
+        int id = FAKE_COMBINE_LANES(lane_start_or_right_child);
+        unsigned long envword =
+            evw_new(id, process_vertexs_on_one_lane_KCORE_MULTI::start);
+        send_event(envword, args, 5, evw_update_event(CEVNT, done_left));
+      }
+    }
+
+    // --- DISPATCH RIGHT CHILD ---
+    if (1) {
+      // Right half: N-N/2 vertices, M-edges_for_left edges
+      if (1) {
+        args[0] = N - counter;                    // N for right child
+        args[1] = M - edges_for_left_half;         // M for right child
+        ASSERT_UDW_NON_NEGATIVE(M - edges_for_left_half);
+      }
+      if (1) {
+        args[2] = vertexs + (counter * vertex_size); // right half starts after left
+        args[5] = edges_before_vertex;             // cumulative edges at midpoint
+      }
+
+      if (1) {
+        args[6] = num_lanes_or_left_child - lanes_for_left_half; // remaining lanes
+        args[7] = lane_start_or_right_child + lanes_for_left_half; // right's lane start
+      }
+      int local_lane_start = FAKE_COMBINE_LANES(args[7]);
+      if (depth < FORCE_FIRST_NODE) {
+        local_lane_start = local_lane_start % 2048;
+      }
+
+      if ((num_lanes_or_left_child - lanes_for_left_half) > 1) {
+        // Multiple lanes for right → recurse binary split
+        unsigned long envword = evw_new(local_lane_start, start);
+        send_event(envword, args, 9, evw_update_event(CEVNT, done_right));
+      } else { /* lanes_for_right_half == 1 */
+        if (args[0] > 1) {
+          // Multiple vertices on 1 lane → sequential processing
+          unsigned long envword =
+              evw_new(local_lane_start,
+                      process_vertexs_on_one_lane_KCORE_MULTI::start);
+          send_event(envword, args, 5, evw_update_event(CEVNT, done_right));
+        } else {
+          // OPTIMIZATION: Right half is exactly 1 vertex (the midpoint vertex
+          // we already read). We have its data from this event's parameters,
+          // so dispatch directly without another DRAM read.
+          if (degree_ == 0) {
+            // Midpoint vertex is deleted — mark right child as empty
+            counter = 0;
+            N = 0;
+            M = 0;
+            lane_start_or_right_child = 0;
+            yield;
+          }
+          args[0] = edges_;
+          args[1] = degree_;
+          // args[2] = edges_before_vertex; // unused
+          args[2] = vertex_id_;
+          args[3] = graph;
+          args[4] = 0; // unused
+          args[5] = curr_score;
+          unsigned long envword =
+              evw_new(local_lane_start,
+                      process_vertex_on_one_lane_KCORE_MULTI::start);
+          send_event(envword, args, 6, evw_update_event(CEVNT, done_right));
+        }
+      }
+    }
+    // Wait for 2 children (counter=1; last done to arrive fires completion)
+    counter = 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: done_left
+  // -------------------------------------------------------------------------
+  // Called by: Left child when it completes one iteration.
+  // Purpose:  Collect left child's result. If right child already reported
+  //           (counter==0), aggregate and report to parent. Otherwise, save
+  //           and wait for right child.
+  //
+  // Parameters:
+  //   unused            — not used
+  //   partial_max_delta — max score change from left sub-tree
+  //   new_child         — left child's run_iter event word (for next iteration)
+  //
+  // IMPORTANT: After first iteration, num_lanes_or_left_child is repurposed
+  //   to store the left child's run_iter event word.
+  //
+  // The done logic handles 4 cases for what to report as the "child event"
+  // to our parent:
+  //   - Both children null → report 0 (no run_iter needed), yield_terminate
+  //   - Only one child alive → report that child's event directly
+  //   - Both alive → report our own run_iter event (we'll fan out next time)
+  //
+  event done_left(unsigned long unused, long partial_max_delta,
+                  unsigned long new_child) {
+    ASSERT_UDW_NON_NEGATIVE(counter);
+    // If right child already reported (counter==0), we're the last → report up
+    if (counter == 0) {
+      if (partial_max_delta > current_max_distance) {
+        current_max_distance = partial_max_delta;
+      }
+      // Case: both children are empty (no future iterations needed)
+      if (new_child == 0 && lane_start_or_right_child == 0) {
+        send_event(CCONT, 0, current_max_distance, 0, IGNRCONT);
+        yield_terminate;
+      }
+      // Case: left child empty, only right child needs future iterations
+      if (new_child == 0) {
+        send_event(CCONT, 0, current_max_distance, lane_start_or_right_child,
+                   IGNRCONT);
+        yield_terminate;
+      }
+      // Case: right child empty, only left child needs future iterations
+      if (lane_start_or_right_child == 0) {
+        send_event(CCONT, 0, current_max_distance, new_child, IGNRCONT);
+        yield_terminate;
+      }
+      // Case: both children alive → report our run_iter as the child event
+      send_event(CCONT, 0, current_max_distance,
+                 evw_update_event(CEVNT, run_iter), IGNRCONT);
+      num_lanes_or_left_child = new_child;  // repurpose: store left child event
+      counter = -1;
+      yield;
+    }
+    // Right child hasn't reported yet — save left's result and wait
+    num_lanes_or_left_child = new_child;
+    current_max_distance = partial_max_delta;
+    counter = 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: done_right — symmetric to done_left
+  // -------------------------------------------------------------------------
+  // Called by: Right child when it completes one iteration.
+  // Same logic as done_left but for the right child.
+  // Stores right child's event in lane_start_or_right_child.
+  //
+  event done_right(unsigned long unused, unsigned long partial_max_delta,
+                   unsigned long new_child) {
+    ASSERT_UDW_NON_NEGATIVE(counter);
+    if (counter == 0) {
+      if (partial_max_delta > current_max_distance) {
+        current_max_distance = partial_max_delta;
+      }
+      if (new_child == 0 && num_lanes_or_left_child == 0) {
+        send_event(CCONT, 0, current_max_distance, 0, IGNRCONT);
+        yield_terminate;
+      }
+      if (new_child == 0) {
+        send_event(CCONT, 0, current_max_distance, num_lanes_or_left_child,
+                   IGNRCONT);
+        yield_terminate;
+      }
+      if (num_lanes_or_left_child == 0) {
+        send_event(CCONT, 0, current_max_distance, new_child, IGNRCONT);
+        yield_terminate;
+      }
+      send_event(CCONT, 0, current_max_distance,
+                 evw_update_event(CEVNT, run_iter), IGNRCONT);
+      lane_start_or_right_child = new_child;  // repurpose: store right child event
+      counter = -1;
+      yield;
+    }
+    lane_start_or_right_child = new_child;
+    current_max_distance = partial_max_delta;
+    counter = 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: run_iter (binary splitter)
+  // -------------------------------------------------------------------------
+  // Called by: Parent on subsequent iterations (or to stop)
+  // Purpose:  Forward run_iter to both children. After first iteration,
+  //           num_lanes_or_left_child and lane_start_or_right_child hold
+  //           the children's run_iter event words.
+  //
+  event run_iter(long stop_if_neg_1) {
+
+    ASSERT_UDW_NON_ZERO(num_lanes_or_left_child);
+    ASSERT_UDW_NON_ZERO(lane_start_or_right_child);
+    // Forward to both children
+    send_event(num_lanes_or_left_child, stop_if_neg_1,
+               evw_update_event(CEVNT, done_left));
+    send_event(lane_start_or_right_child, stop_if_neg_1,
+               evw_update_event(CEVNT, done_right));
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    counter = 1;  // Expect 2 children, counter=1 (last one triggers completion)
+    yield;
+  }
+}  // end thread split_vertexs2KCORE_MULTI
+
+// ---------------------------------------------------------------------------
+// Per-vertex child data accessors for process_vertexs_on_one_lane
+// ---------------------------------------------------------------------------
+// This thread processes up to 5 vertices concurrently (pipelined) on a
+// single lane. Each "slot" (0-4) tracks one in-flight vertex's state
+// in the child_data scratchpad region, with 6 words per slot:
+//   [0] edges      — current read pointer into neighbor list
+//   [1] edgesend   — pointer past end of neighbor list
+//   [2] vertex_id  — which vertex this slot is processing
+//   [3] numleft    — how many neighbors still need to be processed
+//   [4] score      — running count of alive neighbors (as long)
+//   [5] orig_score — score from previous iteration (as long)
+#define ref_child_edges(ptr, num) ptr[0 + (num * 6)]
+#define ref_child_edgesend(ptr, num) ptr[1 + (num * 6)]
+#define ref_child_vertex_id(ptr, num) ptr[2 + (num * 6)]
+#define ref_child_numleft(ptr, num) ptr[3 + (num * 6)]
+#define ref_child_score(ptr, num) ptr[4 + (num * 6)]
+#define ref_child_orig_score(ptr, num) ptr[5 + (num * 6)]
+
+// =============================================================================
+// THREAD: process_vertexs_on_one_lane_KCORE_MULTI
+// =============================================================================
+// Processes multiple vertices sequentially on a single lane. Uses a pipeline
+// of up to 5 concurrent vertex "slots" to overlap DRAM reads and keep the
+// lane busy while waiting for memory responses.
+//
+// Called by: Split threads when a sub-range is assigned exactly 1 lane
+// Children: None (this is a leaf in the distribution tree)
+//
+// For each vertex:
+//   1. Read vertex struct from DRAM (offsets_loaded_<slot>)
+//   2. Issue batched reads of neighbor IDs from the vertex's edge list
+//      (got_sources_<slot>)
+//   3. For each batch of neighbor IDs, read those neighbors' vertex structs
+//      to check if they're alive (got_curr_<slot>)
+//   4. Accumulate score (count of alive neighbors)
+//   5. Write score back to vertex's scratch fields in DRAM (done_<slot>)
+//   6. Move to next vertex (refill the slot)
+//
+// When all vertices are processed, report (unused, max_delta, run_iter_event)
+// to parent via CCONT.
+//
+thread process_vertexs_on_one_lane_KCORE_MULTI {
+
+  unsigned long *start_vertexs;    // DRAM pointer to first vertex (for re-iteration)
+  unsigned long *vertexs;          // DRAM pointer to next vertex to load into a slot
+  unsigned long *end_vertexs;      // DRAM pointer past the last vertex
+  unsigned long *finished_vertexs; // DRAM pointer tracking how many slots have completed
+
+  long max_delta;                  // Max score change seen across all vertices
+
+  unsigned long *graph;            // DRAM pointer to full graph vertex array
+
+  long remaining_nodes;            // How many vertices still need processing
+  unsigned long iter;              // Current iteration number
+
+  // -------------------------------------------------------------------------
+  // EVENT: start
+  // -------------------------------------------------------------------------
+  // Called by: Splitter thread (via send_ops with 5 operands)
+  // Purpose:  Initialize the pipeline. If N==1, fast-path to single vertex.
+  //           Otherwise, load up to 5 vertices into pipeline slots and
+  //           begin processing.
+  //
+  // Parameters:
+  //   N_       — number of vertices to process
+  //   M_unused — not used (edge count, already implicit in vertex structs)
+  //   vertexs_ — DRAM pointer to start of vertex sub-array
+  //   graph_   — DRAM pointer to full graph vertex array
+  //   unused   — not used
+  //
+  event start(unsigned long N_, unsigned long M_unused, unsigned long *vertexs_,
+              unsigned long *graph_, unsigned long unused) {
+    iter = 0;
+    graph = graph_;
+
+    if (N_ == 1) {
+      unsigned long continuationWord =
+          evw_update_event(CEVNT, one_offset_loaded);
+      send_dram_read(vertexs_, 5, continuationWord);
+      yield;
+    }
+    // Initialize iteration state
+    start_vertexs = vertexs_;
+    vertexs = vertexs_;
+    finished_vertexs = vertexs;
+    end_vertexs = vertexs + (N_ * vertex_size);
+
+    max_delta = 0;
+    remaining_nodes = N_;
+
+    // Fill the 5-slot pipeline: read up to 5 vertex structs from DRAM.
+    // Each read triggers offsets_loaded_<slot> which begins processing
+    // that vertex's neighbor list. As slots complete (done_<slot>), they
+    // are refilled with the next unloaded vertex.
+    unsigned long continuationWord = evw_update_event(CEVNT, offsets_loaded_0);
+    send_dram_read(vertexs, 5, continuationWord);
+
+    vertexs = vertexs + (vertex_size);
+    if (vertexs < end_vertexs) {
+      continuationWord = evw_update_event(CEVNT, offsets_loaded_1);
+      send_dram_read(vertexs, 5, continuationWord);
+      vertexs = vertexs + (vertex_size);
+      if (vertexs < end_vertexs) {
+        continuationWord = evw_update_event(CEVNT, offsets_loaded_2);
+        send_dram_read(vertexs, 5, continuationWord);
+        vertexs = vertexs + (vertex_size);
+        if (vertexs < end_vertexs) {
+          continuationWord = evw_update_event(CEVNT, offsets_loaded_3);
+          send_dram_read(vertexs, 5, continuationWord);
+          vertexs = vertexs + (vertex_size);
+          if (vertexs < end_vertexs) {
+            continuationWord = evw_update_event(CEVNT, offsets_loaded_4);
+            send_dram_read(vertexs, 5, continuationWord);
+            vertexs = vertexs + (vertex_size);
+          }
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: one_offset_loaded  (fast-path for N==1)
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read when there's only 1 vertex to process
+  // Purpose:  Dispatch to process_vertex_on_one_lane_KCORE_MULTI for the
+  //           single-vertex-single-lane case (simpler than the pipeline).
+  //
+  event one_offset_loaded(unsigned long *edges0, unsigned long degree0,
+                          unsigned long edges_before0, unsigned long vertex_id0,
+                          long curr_score) {
+    if (degree0 == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+    ASSERT_UDW_NON_ZERO(degree0);
+    unsigned long *local args = args_scratch_space;
+    args[0] = edges0;
+    args[1] = degree0;
+    // args[2] = edges_before0; // unused
+    args[2] = vertex_id0;
+    args[3] = graph;
+    args[4] = 0; // unused
+    args[5] = curr_score;
+    unsigned long envword = evw_update_event(
+        CEVNT, process_vertex_on_one_lane_KCORE_MULTI::start);
+    send_event(envword, args, 6, CCONT);
+    yield;
+  }
+
+  // -------------------------------------------------------------------------
+  // MACRO: offsets_loaded_event(num) — generates offsets_loaded_0..4
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read of a vertex struct (pipeline slot <num>)
+  // Purpose:  A vertex's data has been loaded. If it's deleted (degree==0),
+  //           skip it and refill the slot. Otherwise, begin reading its
+  //           neighbor list in batches of 8 IDs, sending each batch to
+  //           got_sources_<num>. Store vertex metadata in child_data.
+  //
+  // Parameters (from vertex struct DRAM read):
+  //   edges0      — pointer to neighbor list in DRAM
+  //   degree0     — number of neighbors
+  //   edges_before0 — (not used directly here)
+  //   vertex_id0  — vertex ID
+  //   curr_score  — current score from previous iteration
+  //
+#define offsets_loaded_event(num)                                              \
+  event offsets_loaded_##num(unsigned long *edges0, unsigned long degree0,     \
+                             unsigned long edges_before0,                      \
+                             unsigned long vertex_id0, long curr_score) {      \
+    if (degree0 == 0) {                                                        \
+      remaining_nodes = remaining_nodes - 1;                                   \
+      finished_vertexs = finished_vertexs + vertex_size;                       \
+      if (finished_vertexs == end_vertexs) {                                   \
+        if (remaining_nodes == 0) {                                            \
+          send_event(CCONT, 0, max_delta, 0, IGNRCONT);                        \
+          yield_terminate;                                                     \
+        }                                                                      \
+        send_event(CCONT, 0, max_delta, evw_update_event(CEVNT, run_iter),     \
+                   IGNRCONT);                                                  \
+        yield;                                                                 \
+      }                                                                        \
+      if (vertexs < end_vertexs) {                                             \
+        unsigned long continuationWord =                                       \
+            evw_update_event(CEVNT, offsets_loaded_##num);                     \
+        send_dram_read(vertexs, 5, continuationWord);                          \
+        vertexs = vertexs + (vertex_size);                                     \
+      }                                                                        \
+      yield;                                                                   \
+    }                                                                          \
+    ASSERT_UDW_NON_ZERO(degree0);                                              \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    unsigned long *edges = edges0;                                             \
+    if (1) {                                                                   \
+      int iters = degree0 / 8;                                                 \
+      if (iters * 8 < degree0) {                                               \
+        iters = iters + 1;                                                     \
+      }                                                                        \
+      if (iters > MAX_OUTSTANDING_READ_REQUESTS) {                             \
+        iters = MAX_OUTSTANDING_READ_REQUESTS;                                 \
+      }                                                                        \
+      while (iters > 0) {                                                      \
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources_##num));  \
+        /* +64 is 8 words each 8 bytes in size*/                               \
+        edges = edges + 64;                                                    \
+        iters = iters - 1;                                                     \
+      }                                                                        \
+      ref_child_edges(child_data, num) = edges;                                \
+    }                                                                          \
+    ref_child_edgesend(child_data, num) = edges0 + (degree0 * sizeof(long));   \
+    ref_child_vertex_id(child_data, num) = vertex_id0;                         \
+    ref_child_numleft(child_data, num) = degree0;                              \
+    ref_child_score(child_data, num) = 0;                                      \
+    ref_child_orig_score(child_data, num) = curr_score;                        \
+  }
+  // clang-format off
+    offsets_loaded_event(0)
+    offsets_loaded_event(1)
+    offsets_loaded_event(2)
+    offsets_loaded_event(3)
+    offsets_loaded_event(4)
+  // clang-format on
+
+  // -------------------------------------------------------------------------
+  // MACRO: got_sources_event(num) — generates got_sources_0..4
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read of 8 neighbor IDs from the edge list (slot <num>)
+  // Purpose:  We received a batch of up to 8 neighbor vertex IDs (data0-7).
+  //           For each valid neighbor ID, issue a DRAM read of that neighbor's
+  //           vertex struct (using array_loadN) to check if it's alive.
+  //           If more neighbor IDs remain, issue the next batch read.
+  //           The neighbor vertex data arrives at got_curr_<num>.
+  //
+  // Parameters:
+  //   data0..data7 — up to 8 neighbor vertex IDs from the edge list
+  //   loc          — DRAM address where this batch was read from (auto-provided)
+  //
+  // The number of valid entries is determined by comparing loc against
+  // the stored edges_end pointer (ref_child_edgesend).
+  //
+#define got_sources_event(num)                                                 \
+  event got_sources_##num(                                                     \
+      unsigned long data0, unsigned long data1, unsigned long data2,           \
+      unsigned long data3, unsigned long data4, unsigned long data5,           \
+      unsigned long data6, unsigned long data7, unsigned long *loc) {          \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    unsigned long remaining_words_or_cont =                                    \
+        (ref_child_edgesend(child_data, num) - loc);                           \
+    remaining_words_or_cont = remaining_words_or_cont / sizeof(long);          \
+    if (remaining_words_or_cont > 8) {                                         \
+      remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);       \
+      array_load8(graph, data, vertex_size, 7, remaining_words_or_cont);       \
+      unsigned long *edges = ref_child_edges(child_data, num);                 \
+      if (edges < ref_child_edgesend(child_data, num)) {                       \
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources_##num));  \
+        /* +64 is 8 words each 8 bytes in size*/                               \
+        edges = edges + 64;                                                    \
+        ref_child_edges(child_data, num) = edges;                              \
+      }                                                                        \
+      yield;                                                                   \
+    }                                                                          \
+    if (remaining_words_or_cont >= 5) {                                        \
+      if (remaining_words_or_cont >= 7) {                                      \
+        if (remaining_words_or_cont == 8) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load8(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else {                                                               \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load7(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      } else { /* cases for 5 or 6 */                                          \
+        if (remaining_words_or_cont == 6) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load6(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else { /* remaining_words == 5 */                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load5(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      }                                                                        \
+    } else {                                                                   \
+      if (remaining_words_or_cont >= 3) {                                      \
+        if (remaining_words_or_cont == 4) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load4(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else { /* remaining_words == 3*/                                     \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load3(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      } else { /* cases for 1 or 0*/                                           \
+        if (remaining_words_or_cont == 2) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load2(graph, data, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else { /* remaining_words == 1 */                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load(graph, data0, vertex_size, 7, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+  }
+
+      // clang-format off
+    got_sources_event(0)
+    got_sources_event(1)
+    got_sources_event(2) 
+    got_sources_event(3)
+    got_sources_event(4)
+
+      // clang-format on
+      event
+      ignore2() {
+  }
+
+  // -------------------------------------------------------------------------
+  // MACRO: got_curr_event(num) — generates got_curr_0..4
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read of a neighbor's vertex struct (slot <num>)
+  // Purpose:  THIS IS THE CORE K-CORE ALGORITHM STEP.
+  //           For each neighbor vertex we loaded, check if it's alive:
+  //             - If neighbor_degree > 0 → neighbor is alive → score += 1
+  //             - If neighbor_degree == 0 → neighbor is deleted → score unchanged
+  //           Decrement numleft. When all neighbors processed (numleft==0):
+  //             - Write final score to vertex's scratch fields in DRAM:
+  //               scratch1 = curr_score, scratch2 = orig_score, scratch3 = iter+1
+  //             - Compute delta = |orig_score - curr_score|, track max_delta
+  //
+  // Parameters (from neighbor vertex struct DRAM read, 7 words):
+  //   dests_unused         — neighbor's edge list pointer (not needed)
+  //   neighbor_degree      — neighbor's degree (0 = deleted)
+  //   edges_before_unused  — not used
+  //   other_vertex_id      — neighbor's vertex ID (for debug)
+  //   neighbor_score       — neighbor's current score (not used in k-core)
+  //   old_neighbor_score   — neighbor's previous score (not used)
+  //   first_for_iter       — not used
+  //
+// TODO(wheatman) we don't actually need all this data but its simpler for
+// now
+#define got_curr_event(num)                                                    \
+  event got_curr_##num(                                                        \
+      unsigned long *dests_unused, unsigned long neighbor_degree,              \
+      unsigned long edges_before_unused, unsigned long other_vertex_id,        \
+      long neighbor_score, long old_neighbor_score,                            \
+      unsigned long first_for_iter) {                                          \
+    long *local child_data;                                                    \
+    local_child_data_ptr(child_data);                                          \
+    unsigned long vertex_id = ref_child_vertex_id(child_data, num);            \
+    /* K-CORE LOGIC: count alive neighbors */                                  \
+    long curr_score = ref_child_score(child_data, num);                        \
+    if (neighbor_degree != 0) {                                                \
+      /* Neighbor is alive → increment score by 1 */                           \
+      curr_score++;                                                            \
+      ref_child_score(child_data, num) = curr_score;                           \
+    }                                                                          \
+    /* Decrement remaining neighbor count for this vertex */                   \
+    unsigned long num_left = ref_child_numleft(child_data, num) - 1;           \
+    ref_child_numleft(child_data, num) = num_left;                             \
+    /* When all neighbors processed, write result to DRAM and compute delta */ \
+    if (num_left == 0) {                                                       \
+      /* Write to vertex struct at offset 32 (scratch1, scratch2, scratch3) */ \
+      /* scratch1 = curr_score, scratch2 = orig_score, scratch3 = iter+1 */    \
+      long *loc = graph + (vertex_id * vertex_size);                           \
+      unsigned long cont = evw_update_event(CEVNT, done_##num);                \
+      long orig_score = ref_child_orig_score(child_data, num);                 \
+      long *local args = args_scratch_space;                                   \
+      args[0] = curr_score;                                                    \
+      args[1] = orig_score;                                                    \
+      args[2] = iter + 1;                                                      \
+      send_dram_write(loc + 32, args, 3, cont);                                \
+      /* Compute |delta| = |orig_score - curr_score| using sign-bit check */   \
+      long delta = orig_score - curr_score;                                    \
+      if (delta < 0) {                                                         \
+        delta = 0 - delta;                                                     \
+      }                                                                        \
+      /* Update max_delta if this vertex's change is the largest so far */     \
+      if (delta > max_delta) {                                                 \
+        max_delta = delta;                                                     \
+      }                                                                        \
+    }                                                                          \
+  }
+
+  // clang-format off
+    got_curr_event(0) 
+    got_curr_event(1) 
+    got_curr_event(2)
+    got_curr_event(3) 
+    got_curr_event(4)
+
+      // clang-format on
+      event
+      ignore3() {}
+
+  // -------------------------------------------------------------------------
+  // MACRO: done_event(num) — generates done_0..4
+  //   (NOTE: This redefines the done_event macro from the 8-way splitter;
+  //    it shadows the earlier definition within this thread's scope.)
+  // -------------------------------------------------------------------------
+  // Called by: DRAM write completion for vertex slot <num>
+  // Purpose:  A vertex's result has been written to DRAM. Advance
+  //           finished_vertexs. If all vertices in range are done, report
+  //           completion to parent. Otherwise, refill this slot with the
+  //           next vertex (if any remain).
+  //
+#define done_event(num)                                                        \
+  event done_##num() {                                                         \
+    /* This slot's vertex is done — advance the completion pointer */          \
+    finished_vertexs = finished_vertexs + vertex_size;                         \
+    /* Check if all slots have completed (all vertices in range processed) */  \
+    if (finished_vertexs == end_vertexs) {                                     \
+      /* If all had degree 0, no more iterations needed */                     \
+      if (remaining_nodes == 0) {                                              \
+        send_event(CCONT, 0, max_delta, 0, IGNRCONT);                          \
+        yield_terminate;                                                       \
+      }                                                                        \
+      /* Report completion with max_delta and our run_iter event */            \
+      send_event(CCONT, 0, max_delta, evw_update_event(CEVNT, run_iter),       \
+                 IGNRCONT);                                                    \
+      yield;                                                                   \
+    }                                                                          \
+    /* Refill this slot: if more vertices remain, start loading the next one */\
+    if (vertexs < end_vertexs) {                                               \
+      unsigned long continuationWord =                                         \
+          evw_update_event(CEVNT, offsets_loaded_##num);                       \
+      send_dram_read(vertexs, 5, continuationWord);                            \
+      vertexs = vertexs + (vertex_size);                                       \
+    }                                                                          \
+  }
+  // clang-format off
+    done_event(0) 
+    done_event(1) 
+    done_event(2)
+    done_event(3) 
+    done_event(4)
+      // clang-format on
+
+      event
+      ignore4() {}
+
+  // -------------------------------------------------------------------------
+  // EVENT: run_iter (multi-vertex single-lane)
+  // -------------------------------------------------------------------------
+  // Called by: Parent splitter on subsequent iterations
+  // Purpose:  Reset state and re-process all vertices from scratch.
+  //           Re-reads vertex structs (degree may have been set to 0 by TOP
+  //           between iterations). Refills the 5-slot pipeline.
+  //
+  event run_iter(long stop_if_neg_1) {
+    iter = iter + 1;
+    ASSERT_UDW_NON_ZERO(remaining_nodes);
+    // print("CCONT = %lx", CCONT);
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    // Reset: recompute remaining_nodes from the vertex range size
+    unsigned long dist = end_vertexs - start_vertexs;
+    remaining_nodes = dist / (vertex_size);
+    vertexs = start_vertexs;
+    finished_vertexs = start_vertexs;
+
+    max_delta = 0;
+
+    // Refill pipeline slots (same logic as start)
+    unsigned long continuationWord = evw_update_event(CEVNT, offsets_loaded_0);
+    send_dram_read(vertexs, 5, continuationWord);
+
+    vertexs = vertexs + (vertex_size);
+    if (vertexs < end_vertexs) {
+      continuationWord = evw_update_event(CEVNT, offsets_loaded_1);
+      send_dram_read(vertexs, 5, continuationWord);
+      vertexs = vertexs + (vertex_size);
+      if (vertexs < end_vertexs) {
+        continuationWord = evw_update_event(CEVNT, offsets_loaded_2);
+        send_dram_read(vertexs, 5, continuationWord);
+        vertexs = vertexs + (vertex_size);
+        if (vertexs < end_vertexs) {
+          continuationWord = evw_update_event(CEVNT, offsets_loaded_3);
+          send_dram_read(vertexs, 5, continuationWord);
+          vertexs = vertexs + (vertex_size);
+          if (vertexs < end_vertexs) {
+            continuationWord = evw_update_event(CEVNT, offsets_loaded_4);
+            send_dram_read(vertexs, 5, continuationWord);
+            vertexs = vertexs + (vertex_size);
+          }
+        }
+      }
+    }
+  }
+}  // end thread process_vertexs_on_one_lane_KCORE_MULTI
+
+// =============================================================================
+// THREAD: process_vertex_on_one_lane_KCORE_MULTI
+// =============================================================================
+// Processes a single vertex (all its edges) on a single lane. This is the
+// simplest leaf case: iterate through all neighbors, count alive ones, write
+// the result back, and report delta to parent.
+//
+// Called by: Splitter threads (binary or 8-way) when 1 vertex gets 1 lane.
+//           Also used by process_vertexs_on_one_lane as a fast-path for N==1.
+// Children: None (leaf node)
+//
+// Data flow per iteration:
+//   1. Read batches of 8 neighbor IDs from edge list (got_sources)
+//   2. For each ID, read neighbor vertex struct (got_curr)
+//   3. If neighbor alive (degree > 0), score += 1
+//   4. When all neighbors processed, write score to DRAM (done)
+//   5. Report (unused, |delta|, run_iter_event) to parent
+//
+thread process_vertex_on_one_lane_KCORE_MULTI {
+
+  unsigned long *start_edges;  // DRAM pointer to start of neighbor list (for re-iteration)
+  unsigned long *edges;        // Current read pointer into neighbor list
+  unsigned long *edges_end;    // DRAM pointer past end of neighbor list
+  long left_to_write;          // Neighbors still to process (counts down to 0)
+  unsigned long vertex_id;     // This vertex's ID
+  unsigned long degree;        // Number of edges (constant across iterations)
+
+  unsigned long *graph;        // Full graph vertex array base
+
+  long score;                  // Running count of alive neighbors this iteration
+  long orig_score;             // Score from previous iteration (for delta computation)
+  unsigned long iter;          // Current iteration number
+
+  // -------------------------------------------------------------------------
+  // EVENT: start
+  // -------------------------------------------------------------------------
+  // Called by: Splitter or multi-vertex processor
+  // Purpose:  Initialize and begin reading neighbor list in batches of 8.
+  //
+  // Parameters:
+  //   edges_      — DRAM pointer to neighbor list
+  //   degree_     — number of neighbors
+  //   vertex_id_  — this vertex's ID
+  //   graph_      — full graph vertex array base
+  //   unused      — not used
+  //   curr_score_ — score from previous iteration
+  //
+  event start(unsigned long *edges_, unsigned long degree_,
+              unsigned long vertex_id_, unsigned long *graph_,
+              unsigned long unused, long curr_score_) {
+    iter = 0;
+    ASSERT_UDW_NON_ZERO(degree_);
+    graph = graph_;
+    start_edges = edges_;
+    edges = edges_;
+    degree = degree_;
+    edges_end = edges_ + (degree_ * sizeof(long));
+    left_to_write = degree_;
+    vertex_id = vertex_id_;
+
+    orig_score = curr_score_;
+    score = 0;
+
+    // Issue up to MAX_OUTSTANDING_READ_REQUESTS batches of 8 neighbor IDs.
+    // Each batch reads 8 words (64 bytes) from the edge list.
+    // Responses arrive at got_sources.
+    int iters = degree_ / 8;
+    if (iters * 8 < degree_) {
+      iters = iters + 1;  // ceiling division
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: got_sources
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read returning a batch of 8 neighbor IDs
+  // Purpose:  For each valid neighbor ID in this batch, issue a DRAM read
+  //           of that neighbor's vertex struct (7 words). If more batches
+  //           remain, issue the next batch read. Uses the array_loadN macros
+  //           to issue the right number of reads based on remaining_words.
+  //
+  event got_sources(
+      unsigned long data0, unsigned long data1, unsigned long data2,
+      unsigned long data3, unsigned long data4, unsigned long data5,
+      unsigned long data6, unsigned long data7, unsigned long *loc) {
+    ASSERT_UDW_NON_NEGATIVE(left_to_write);
+    // Compute how many valid neighbor IDs are at/after this batch's location
+    unsigned long remaining_words = (edges_end - loc);
+    remaining_words = remaining_words / sizeof(long);
+    ASSERT_UDW_NON_NEGATIVE(remaining_words);
+    unsigned long cont = evw_update_event(CEVNT, got_curr);
+    if (remaining_words > 8) {
+      // Full batch of 8 — read all 8 neighbor vertex structs
+      array_load8(graph, data, vertex_size, 7, cont);
+      // Issue next batch if more edges remain
+      if (edges < edges_end) {
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+        // +64 is 8 words each 8 bytes in size
+        edges = edges + 64;
+      }
+      yield;
+    }
+
+    if (remaining_words >= 5) {
+      if (remaining_words >= 7) {
+        if (remaining_words == 8) {
+          array_load8(graph, data, vertex_size, 7, cont);
+          yield;
+        } else {
+          array_load7(graph, data, vertex_size, 7, cont);
+          yield;
+        }
+
+      } else { // cases for 5 or 6
+        if (remaining_words == 6) {
+          array_load6(graph, data, vertex_size, 7, cont);
+          yield;
+        } else { // remaining_words == 5
+          array_load5(graph, data, vertex_size, 7, cont);
+          yield;
+        }
+      }
+    } else {
+      if (remaining_words >= 3) {
+        if (remaining_words == 4) {
+          array_load4(graph, data, vertex_size, 7, cont);
+          yield;
+        } else { // remaining_words == 3
+          array_load3(graph, data, vertex_size, 7, cont);
+          yield;
+        }
+      } else { // cases for 1 or 0
+        if (remaining_words == 2) {
+          array_load2(graph, data, vertex_size, 7, cont);
+          yield;
+        } else { // remaining_words == 1
+          array_load(graph, data0, vertex_size, 7, cont);
+          yield;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: got_curr
+  // -------------------------------------------------------------------------
+  // Called by: DRAM read of a neighbor's vertex struct (7 words)
+  // Purpose:  K-CORE ALGORITHM: check if neighbor is alive.
+  //           If neighbor_degree > 0 → alive → score += 1
+  //           If neighbor_degree == 0 → deleted → score unchanged
+  //           When all neighbors processed, write result to DRAM.
+  //
+  event got_curr(unsigned long *dests_unused, unsigned long neighbor_degree,
+                 unsigned long edges_before_unused,
+                 unsigned long other_vertex_id, long neighbor_score,
+                 long old_neighbor_score, unsigned long first_for_iter) {
+    // K-core logic: count alive neighbors
+    if (neighbor_degree != 0) {
+      //print("Main Vertex: %lu, Neighbor Vertex: %lu", vertex_id, other_vertex_id);
+      score++;  // Neighbor alive — count it
+    }
+
+    left_to_write = left_to_write - 1;
+    // When all neighbors have been checked, write result to vertex's scratch fields
+    if (left_to_write == 0) {
+      // Write 3 words at vertex offset 32: [score, orig_score, iter+1]
+      // This updates scratch1 (new score), scratch2 (old score), scratch3 (iter)
+      unsigned long *loc = graph + (vertex_id * vertex_size);
+      long *local args = args_scratch_space;
+      args[0] = score;
+      args[1] = orig_score;
+      args[2] = iter + 1;
+      send_dram_write(loc + 32, args, 3, evw_update_event(CEVNT, done));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: done
+  // -------------------------------------------------------------------------
+  // Called by: DRAM write completion after writing vertex result
+  // Purpose:  Compute |delta| = |score - orig_score| and report to parent.
+  //
+  event done() {
+    ASSERT_UDW_ZERO(left_to_write);
+    // Compute absolute delta using sign-bit trick (bit 63 = sign)
+    long diff = score - orig_score;
+    if (diff < 0) {
+      diff = 0 - diff;
+    }
+    // Report: (unused=0, |delta|, run_iter_event_word) to parent via CCONT
+    send_event(CCONT, 0, diff, evw_update_event(CEVNT, run_iter), IGNRCONT);
+  }
+
+  // -------------------------------------------------------------------------
+  // EVENT: run_iter
+  // -------------------------------------------------------------------------
+  // Called by: Parent on subsequent iterations
+  // Purpose:  Reset score and re-read all neighbors. The orig_score for
+  //           this iteration becomes the score from the previous iteration.
+  //
+  event run_iter(long stop_if_neg_1) {
+    iter = iter + 1;
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    orig_score = score;  // Previous score becomes the old score
+    score = 0;           // Reset running count
+
+    edges = start_edges;
+    left_to_write = degree;
+
+    // Re-issue neighbor list reads (same as start)
+    int iters = degree / 8;
+    if (iters * 8 < degree) {
+      iters = iters + 1;
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+}
+
+// =============================================================================
+// THREAD: process_partial_vertex_on_one_lane_KCORE_MULTI
+// =============================================================================
+// PURPOSE: Processes a SUBSET of a single vertex's edges on one lane and
+//   returns the partial alive-neighbor count (score) to the parent thread.
+//   This is used when process_vertex_KCORE_MULTI splits a high-degree vertex's
+//   edge list across multiple lanes for parallel processing.
+//
+// CALLER: process_vertex_KCORE_MULTI::start or ::recurse (via send_ops)
+//   - The parent sets CCONT so this thread's completion message goes back to
+//     done_left / done_right / done_left_final / done_right_final in the parent.
+//
+// KEY DIFFERENCE from process_vertex_on_one_lane_KCORE_MULTI:
+//   - Does NOT write results to DRAM (no send_dram_write of score).
+//   - Instead, sends partial score back to parent via CCONT.
+//   - The parent aggregates partial scores from all children and writes to DRAM.
+//
+// PARAMETERS (via start event):
+//   edges_  : pointer into the edge list (NOT necessarily the start of the vertex's edges)
+//   degree_ : number of edges in THIS SUBSET (not the full vertex degree)
+//   vertex_id_ : the vertex being processed
+//   graph_  : base address of the graph array in DRAM
+//
+// THREAD STATE:
+//   start_edges : saved start pointer for re-iteration
+//   edges       : current read cursor (advances with each DRAM read batch)
+//   edges_end   : pointer past the last edge in this subset
+//   left_to_write : countdown of edges remaining to process in this iteration
+//   score       : accumulated alive-neighbor count for this subset
+//   iter        : iteration counter
+// =============================================================================
+thread process_partial_vertex_on_one_lane_KCORE_MULTI {
+
+  unsigned long *start_edges;
+  unsigned long *edges;
+  unsigned long *edges_end;
+  long left_to_write;
+  unsigned long vertex_id;
+  unsigned long degree;
+
+  unsigned long *graph;
+
+  long score;
+  unsigned long iter;
+
+  // ---------------------------------------------------------------------------
+  // EVENT: start
+  // ---------------------------------------------------------------------------
+  // Called by: process_vertex_KCORE_MULTI::start or ::recurse (via send_ops
+  //   with CCONT pointing back to parent's done_left/done_right handler)
+  //
+  // Initializes thread state for processing a subset of edges, then kicks off
+  // pipelined DRAM reads of the edge list (neighbor vertex IDs).
+  // Each DRAM read fetches 8 words (8 neighbor IDs). Up to MAX_OUTSTANDING_READ_REQUESTS
+  // reads are issued in parallel to fill the pipeline.
+  // ---------------------------------------------------------------------------
+  event start(unsigned long *edges_, unsigned long degree_,
+              unsigned long vertex_id_, unsigned long *graph_,
+              unsigned long unused, unsigned long unused2) {
+    iter = 0;
+    ASSERT_UDW_NON_ZERO(degree_);
+    graph = graph_;
+    start_edges = edges_;  // Save for re-iteration
+    edges = edges_;        // Current read cursor
+    degree = degree_;
+    edges_end = edges_ + (degree_ * sizeof(long));  // Pointer past last edge
+    left_to_write = degree_;  // Edges remaining to process
+    vertex_id = vertex_id_;
+    score = 0;  // Reset partial score
+
+    // Pipeline: issue up to MAX_OUTSTANDING_READ_REQUESTS batched DRAM reads
+    int iters = degree_ / 8;       // Number of full 8-word batches
+    if (iters * 8 < degree_) {
+      iters = iters + 1;           // Round up for partial last batch
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;  // Cap pipeline depth
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+  // ---------------------------------------------------------------------------
+  // EVENT: got_sources
+  // ---------------------------------------------------------------------------
+  // Called by: DRAM read completion (from start or previous got_sources pipeline)
+  //
+  // Receives 8 neighbor vertex IDs from a batched DRAM read of the edge list.
+  // For each neighbor, issues a DRAM read of that neighbor's vertex struct
+  // (specifically field 7 = score/degree info) via array_loadN macros.
+  //
+  // Pipeline continuation: if more edges remain beyond the current batch AND
+  // the read cursor hasn't reached edges_end, issues the next DRAM read to
+  // keep the pipeline full.
+  //
+  // The remaining_words calculation determines how many of the 8 returned
+  // words are valid (the last batch may be partial). Uses a binary search
+  // tree of if/else to select the correct array_loadN variant (1-8).
+  //
+  // Each array_loadN triggers N got_curr callbacks, one per neighbor.
+  // ---------------------------------------------------------------------------
+  event got_sources(
+      unsigned long data0, unsigned long data1, unsigned long data2,
+      unsigned long data3, unsigned long data4, unsigned long data5,
+      unsigned long data6, unsigned long data7, unsigned long *loc) {
+    ASSERT_UDW_NON_NEGATIVE(left_to_write);
+    // Calculate how many of the 8 words are valid edges in this subset
+    unsigned long remaining_words = (edges_end - loc);
+    remaining_words = remaining_words / sizeof(long);
+    ASSERT_UDW_NON_NEGATIVE(remaining_words);
+    unsigned long cont = evw_update_event(CEVNT, got_curr);
+
+    // Fast path: >8 remaining means all 8 words are valid neighbors
+    if (remaining_words > 8) {
+      array_load8(graph, data, vertex_size, 7, cont);
+      // Pipeline: issue next batch read if more edges remain
+      if (edges < edges_end) {
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+        // +64 is 8 words each 8 bytes in size
+        edges = edges + 64;
+      }
+      yield;
+    }
+
+    // Slow path: last batch — use exact array_loadN for remaining_words (1..8)
+    // Binary search tree selects correct variant
+    if (remaining_words >= 5) {
+      if (remaining_words >= 7) {
+        if (remaining_words == 8) {
+          array_load8(graph, data, vertex_size, 7, cont);
+          yield;
+        } else {
+          array_load7(graph, data, vertex_size, 7, cont);
+          yield;
+        }
+
+      } else { // cases for 5 or 6
+        if (remaining_words == 6) {
+          array_load6(graph, data, vertex_size, 7, cont);
+          yield;
+        } else { // remaining_words == 5
+          array_load5(graph, data, vertex_size, 7, cont);
+          yield;
+        }
+      }
+    } else {
+      if (remaining_words >= 3) {
+        if (remaining_words == 4) {
+          array_load4(graph, data, vertex_size, 7, cont);
+          yield;
+        } else { // remaining_words == 3
+          array_load3(graph, data, vertex_size, 7, cont);
+          yield;
+        }
+      } else { // cases for 1 or 2
+        if (remaining_words == 2) {
+          array_load2(graph, data, vertex_size, 7, cont);
+          yield;
+        } else { // remaining_words == 1
+          array_load(graph, data0, vertex_size, 7, cont);
+          yield;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: got_curr
+  // ---------------------------------------------------------------------------
+  // Called by: DRAM read completion from array_loadN (neighbor vertex data)
+  //
+  // Receives the vertex struct fields for one neighbor. Implements the K-CORE
+  // ALGORITHM logic: if the neighbor is alive (degree != 0), increment the
+  // partial score by 1. If neighbor is dead (degree == 0), score unchanged.
+  //
+  // When all edges in this subset have been processed (left_to_write == 0),
+  // sends the partial score back to the parent process_vertex_KCORE_MULTI
+  // thread via CCONT. The message payload is:
+  //   (neighbor_degree, score, run_iter_event_word, IGNRCONT)
+  // The parent's done_left/done_right handler accumulates this partial score.
+  // The run_iter event word is sent so the parent can forward run_iter to us.
+  // ---------------------------------------------------------------------------
+  event got_curr(unsigned long *dests_unused, unsigned long neighbor_degree,
+                 unsigned long edges_before_unused,
+                 unsigned long other_vertex_id, long neighbor_score,
+                 long old_neighbor_score, unsigned long first_for_iter) {
+    // K-CORE ALGORITHM: count alive neighbors in this edge subset
+    left_to_write = left_to_write - 1;
+
+    if (neighbor_degree != 0) {
+      // Neighbor is alive — increment partial score
+      score++;
+    }
+
+    if (left_to_write == 0) {
+          // All edges in this subset processed — report partial score to parent
+          // Args: (unused, partial_score, our_run_iter_event_word, IGNRCONT)
+          // Parent will use our run_iter event word to forward iteration signals
+          send_event(CCONT, neighbor_degree, score, evw_update_event(CEVNT, run_iter), IGNRCONT);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: run_iter
+  // ---------------------------------------------------------------------------
+  // Called by: process_vertex_KCORE_MULTI::run_iter or ::run_iter_top, which
+  //   forwards the iteration signal to all children (left_child, right_child).
+  //
+  // If stop_if_neg_1 == -1: algorithm has converged, terminate this thread.
+  // Otherwise: reset state and re-process all edges in this subset for the
+  //   new iteration (TOP has updated vertex degrees in DRAM for deleted vertices).
+  // ---------------------------------------------------------------------------
+  event run_iter(long stop_if_neg_1) {
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;  // Algorithm done — destroy this thread
+    }
+    iter = iter + 1;
+    score = 0;  // Reset partial score for new iteration
+
+    // Reset read cursor to beginning of this edge subset
+    edges = start_edges;
+    left_to_write = degree;
+
+    // Re-issue pipelined DRAM reads for the edge list
+    int iters = degree / 8;
+    if (iters * 8 < degree) {
+      iters = iters + 1;
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+}
+
+// =============================================================================
+// THREAD: process_vertex_KCORE_MULTI
+// =============================================================================
+// PURPOSE: Handles a SINGLE high-degree vertex by splitting its edge list
+//   across multiple lanes for parallel processing. This is the "vertex splitter"
+//   that complements the "vertex range splitter" (split_vertexs*) threads.
+//
+// CALLER: process_vertexs_on_one_lane_KCORE_MULTI — when a vertex has enough
+//   edges AND enough lanes are available, it dispatches the vertex here instead
+//   of processing it inline.
+//
+// APPROACH: Recursively bisects the edge list:
+//   - If num_lanes <= 1 or degree <= 32: BASE CASE — dispatch to
+//     process_vertex_on_one_lane_KCORE_MULTI (first iteration, writes to DRAM)
+//     or process_partial_vertex_on_one_lane_KCORE_MULTI (recursive, returns partial)
+//   - Otherwise: split edges in half, send each half to a new `recurse` event
+//     on a different lane, collect partial scores from both children.
+//
+// FIRST ITERATION vs SUBSEQUENT ITERATIONS:
+//   - start event uses done_left_final / done_right_final continuations.
+//     These write the final combined score to DRAM and report delta to parent.
+//   - recurse event uses done_left / done_right continuations.
+//     These just accumulate partial scores and report upward via CCONT.
+//
+// EDGE ALIGNMENT: edges_per_split is rounded DOWN to a multiple of 8 so that
+//   DRAM reads (which fetch 8 words at a time) are aligned to batch boundaries.
+//
+// THREAD STATE:
+//   counter    : number of children still outstanding (starts at 2)
+//   degree     : total edges for this vertex
+//   vertex_id  : the vertex being processed
+//   left_child / right_child : event words for forwarding run_iter to children
+//   orig_score : score from the previous iteration (for delta computation)
+//   score      : accumulated score from children in current iteration
+//   graph      : base address of graph array in DRAM
+//   iter       : iteration counter
+// =============================================================================
+thread process_vertex_KCORE_MULTI {
+  unsigned long counter;
+  unsigned long degree;
+
+  unsigned long vertex_id;
+
+  unsigned long left_child;
+  unsigned long right_child;
+
+  long orig_score;
+  long score;
+
+  unsigned long *graph;
+  unsigned long iter;
+
+  // ---------------------------------------------------------------------------
+  // EVENT: start
+  // ---------------------------------------------------------------------------
+  // Called by: process_vertexs_on_one_lane_KCORE_MULTI (first iteration only)
+  //   via send_event with CCONT pointing to the parent's done handler.
+  //
+  // This is the FIRST ITERATION entry point. It either:
+  //   (a) BASE CASE: dispatches to process_vertex_on_one_lane_KCORE_MULTI
+  //       if only 1 lane or degree <= 32
+  //   (b) RECURSIVE: splits edges in half, sends each half to `recurse` on
+  //       different lanes, with done_left_final / done_right_final continuations.
+  //
+  // The _final continuations write the combined score to DRAM (since this is
+  // the root of the per-vertex edge split tree on the first iteration).
+  //
+  // Parameters:
+  //   edges       : pointer to this vertex's edge list in DRAM
+  //   degree_     : number of edges (neighbors)
+  //   vertex_id_  : vertex ID
+  //   graph_      : base address of graph array
+  //   curr_score_ : current score from previous iteration (for delta)
+  //   num_lanes   : lanes allocated for this vertex
+  //   lane_start  : starting lane ID (encoded with FAKE_SPREAD_LANES)
+  //   depth       : recursion depth (for debugging)
+  // ---------------------------------------------------------------------------
+  event start(unsigned long *edges, unsigned long degree_,
+              unsigned long vertex_id_, unsigned long *graph_,
+              unsigned long unused, long curr_score_, unsigned long num_lanes,
+              int lane_start, unsigned long depth) {
+    ASSERT_UDW_NON_ZERO(degree_);
+
+    // BASE CASE: only 1 lane available or degree small enough for one lane
+    if (num_lanes <= 1 || degree_ <= 32) {
+      // Dispatch to single-lane processor (handles full vertex, writes to DRAM)
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_vertex_on_one_lane_KCORE_MULTI::start);
+#ifdef ENABLE_SEND_TO_SHORTEST
+      send_ops(evwWord, edges, 6, CCONT, SP_SHORTEST);
+#else
+      send_ops(evwWord, edges, 6, CCONT);
+#endif
+      yield;  // This thread is done (forwarded to single-lane processor)
+    }
+    iter = 0;
+
+    degree = degree_;
+    vertex_id = vertex_id_;
+
+    graph = graph_;
+    orig_score = curr_score_;
+    score = 0;
+
+    // RECURSIVE CASE: split edges in half across two child lane groups
+    unsigned long edges_per_split = degree >> 1;  // Half the edges
+    unsigned long lanes_per_split = num_lanes >> 1;  // Half the lanes
+
+    // Round edges_per_split DOWN to multiple of 8 for DRAM read alignment
+    if (edges_per_split % 8 != 0) {
+      edges_per_split = edges_per_split >> 3;
+      edges_per_split = edges_per_split;  // (no-op, likely artifact)
+      edges_per_split = edges_per_split << 3;
+    }
+
+    // --- LEFT CHILD: first half of edges ---
+    unsigned long *local args = args_scratch_space;
+    if (1) {  // Register scoping block
+      args[0] = edges;                // Start of edge list
+      args[1] = edges_per_split;      // Number of edges for left child
+      args[2] = vertex_id;
+      args[3] = graph_;
+      args[4] = 0; // unused
+      args[5] = 0; // unused
+      args[6] = lanes_per_split;      // Lanes allocated to left child
+      args[7] = lane_start;           // Left child starts at same lane
+      args[8] = depth + 1;
+      int id = FAKE_COMBINE_LANES(lane_start);  // Convert to network ID
+      unsigned long evwWord = evw_new(id, recurse);
+      // Use done_left_final (writes to DRAM on first iteration)
+      unsigned long continuationWord = evw_update_event(CEVNT, done_left_final);
+      send_event(evwWord, args, 9, continuationWord);
+    }
+    // --- RIGHT CHILD: second half of edges ---
+    if (1) {  // Register scoping block
+      // Reuse args array, update only changed fields
+      if (1) {
+        counter = (edges_per_split * sizeof(long));  // Byte offset
+        args[0] = edges + counter;            // Right half starts after left
+        args[1] = degree - edges_per_split;   // Remaining edges
+        // args[2], args[3] unchanged (vertex_id, graph)
+        args[6] = num_lanes - lanes_per_split;  // Remaining lanes
+      }
+      int id = lane_start + lanes_per_split;  // Right child starts after left's lanes
+      args[7] = id;
+      id = FAKE_COMBINE_LANES(id);  // Convert to network ID
+      unsigned long evwWord = evw_new(id, recurse);
+      // Use done_right_final (writes to DRAM on first iteration)
+      counter = evw_update_event(CEVNT, done_right_final);
+      send_event(evwWord, args, 9, counter);
+    }
+
+    counter = 2;  // Expecting results from 2 children
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: recurse
+  // ---------------------------------------------------------------------------
+  // Called by: start or another recurse event (on a different lane)
+  //
+  // This is the RECURSIVE entry point for subsequent levels of the edge split
+  // tree. Unlike `start`, this uses done_left / done_right continuations
+  // (not done_left_final / done_right_final) because intermediate nodes
+  // do NOT write to DRAM — they just accumulate partial scores and pass them up.
+  //
+  // BASE CASE: If num_lanes <= 1 or degree <= 32, dispatch to
+  //   process_partial_vertex_on_one_lane_KCORE_MULTI (returns partial score,
+  //   does NOT write to DRAM).
+  //
+  // RECURSIVE CASE: Same bisection logic as `start` — split edges in half,
+  //   send to two children on different lanes.
+  // ---------------------------------------------------------------------------
+  event recurse(unsigned long *edges, unsigned long degree_,
+                unsigned long vertex_id_, unsigned long *graph_,
+                unsigned long unused, unsigned long unused2,
+                unsigned long num_lanes, int lane_start, unsigned long depth) {
+    // BASE CASE: dispatch to partial vertex processor (returns score via CCONT)
+    if (num_lanes <= 1 || degree_ <= 32) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_partial_vertex_on_one_lane_KCORE_MULTI::start);
+#ifdef ENABLE_SEND_TO_SHORTEST
+      send_ops(evwWord, edges, 6, CCONT, SP_SHORTEST);
+#else
+      send_ops(evwWord, edges, 6, CCONT);
+#endif
+      yield;  // This thread done (forwarded to partial processor)
+    }
+
+    // RECURSIVE CASE: further bisect the edge list
+    degree = degree_;
+    vertex_id = vertex_id_;
+
+    graph = graph_;
+    score = 0;
+
+    unsigned long edges_per_split = degree >> 1;
+    unsigned long lanes_per_split = num_lanes >> 1;
+
+    // Round down to multiple of 8 for DRAM alignment
+    if (edges_per_split % 8 != 0) {
+      edges_per_split = edges_per_split >> 3;
+      edges_per_split = edges_per_split;  // (no-op artifact)
+      edges_per_split = edges_per_split << 3;
+    }
+
+    // --- LEFT CHILD ---
+    unsigned long *local args = args_scratch_space;
+    if (1) {  // Register scoping block
+      args[0] = edges;
+      args[1] = edges_per_split;
+      args[2] = vertex_id;
+      args[3] = graph_;
+      args[4] = 0; // unused
+      args[5] = 0; // unused
+      args[6] = lanes_per_split;
+      args[7] = lane_start;
+      args[8] = depth + 1;
+      int id = FAKE_COMBINE_LANES(lane_start);
+      unsigned long evwWord = evw_new(id, recurse);
+      // Use done_left (NOT _final — intermediate node, no DRAM write)
+      unsigned long continuationWord = evw_update_event(CEVNT, done_left);
+      send_event(evwWord, args, 9, continuationWord);
+    }
+    // --- RIGHT CHILD ---
+    if (1) {  // Register scoping block
+      // Reuse args, update changed fields
+      if (1) {
+        counter = (edges_per_split * sizeof(long));
+        args[0] = edges + counter;
+        args[1] = degree - edges_per_split;
+        args[6] = num_lanes - lanes_per_split;
+      }
+      int id = lane_start + lanes_per_split;
+      args[7] = id;
+      id = FAKE_COMBINE_LANES(id);
+      unsigned long evwWord = evw_new(id, recurse);
+      // Use done_right (NOT _final — intermediate node)
+      counter = evw_update_event(CEVNT, done_right);
+      send_event(evwWord, args, 9, counter);
+    }
+
+    counter = 2;  // Expecting 2 children
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: done_left  (intermediate / recursive case)
+  // ---------------------------------------------------------------------------
+  // Called by: left child's completion (process_partial_vertex or recurse's
+  //   done handler via CCONT)
+  //
+  // Accumulates the left child's partial score. Saves the child's run_iter
+  // event word (new_child) so we can forward iteration signals to it later.
+  //
+  // When both children have reported (counter == 1 means we're the second):
+  //   - Sends combined score to OUR parent via CCONT
+  //   - Includes our run_iter event word so parent can forward iterations
+  // ---------------------------------------------------------------------------
+  event done_left(unsigned long child_degree, long child_score,
+                  unsigned long new_child) {
+    left_child = new_child;  // Save child's run_iter event word
+    score = score + child_score;  // Accumulate partial score
+
+    if (counter == 1) {
+      // Both children done — report combined score to parent via CCONT
+      send_event(CCONT, child_degree, score, evw_update_event(CEVNT, run_iter), IGNRCONT);
+      yield;
+    }
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;  // First child done, waiting for second
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: done_right  (intermediate / recursive case)
+  // ---------------------------------------------------------------------------
+  // Called by: right child's completion (symmetric to done_left)
+  //
+  // Same logic as done_left but for the right child. Either child can arrive
+  // first — the counter mechanism handles both orderings.
+  // ---------------------------------------------------------------------------
+  event done_right(unsigned long child_degree, long child_score,
+                   unsigned long new_child) {
+    right_child = new_child;  // Save child's run_iter event word
+    score = score + child_score;
+
+    if (counter == 1) {
+      // Both children done — report combined score to parent
+      send_event(CCONT, child_degree, score, evw_update_event(CEVNT, run_iter), IGNRCONT);
+      yield;
+    }
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: done_left_final  (FIRST ITERATION — root of per-vertex split tree)
+  // ---------------------------------------------------------------------------
+  // Called by: left child's completion on the FIRST iteration only.
+  //
+  // Same accumulation logic as done_left, but when both children are done,
+  // this event WRITES THE FINAL SCORE TO DRAM (because this is the root node
+  // of the per-vertex edge split tree on iteration 0).
+  //
+  // DRAM write target: vertex struct fields at offset +32 bytes):
+  //   word 0 (field 4): score      — alive neighbor count
+  //   word 1 (field 5): orig_score — score from previous iteration
+  //   word 2 (field 6): iter + 1   — iteration number (1-indexed)
+  //
+  // After DRAM write completes, done_write is triggered to report delta.
+  // ---------------------------------------------------------------------------
+  event done_left_final(unsigned long child_degree, long child_score,
+                        unsigned long new_child) {
+    ASSERT_UDW_NON_ZERO(counter);
+    left_child = new_child;  // Save child's run_iter event word
+    score = score + child_score;
+
+    if (counter == 1) {
+      // Both children done — write combined score to DRAM
+      counter = 0;
+
+      // Compute DRAM address: vertex struct base + offset to score fields
+      unsigned long *loc = graph + (vertex_id * vertex_size);
+      long *local args = args_scratch_space;
+      args[0] = score;        // Field 4: new score (alive neighbors)
+      args[1] = orig_score;   // Field 5: previous score (for delta)
+      args[2] = iter + 1;            // Field 6: iteration number
+      // Write 3 words at loc+32 (fields 4,5,6 of vertex struct)
+      send_dram_write(loc + 32, args, 3, evw_update_event(CEVNT, done_write));
+
+      yield;
+    }
+
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;  // First child done
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: done_right_final  (FIRST ITERATION — root of per-vertex split tree)
+  // ---------------------------------------------------------------------------
+  // Called by: right child's completion on the FIRST iteration only.
+  //   Symmetric to done_left_final. See comments there for full details.
+  // ---------------------------------------------------------------------------
+  event done_right_final(unsigned long child_degree, long child_score,
+                         unsigned long new_child) {
+
+    ASSERT_UDW_NON_ZERO(counter);
+    right_child = new_child;
+    score = score + child_score;
+
+    if (counter == 1) {
+      // Both children done — write combined score to DRAM
+      counter = 0;
+
+      unsigned long *loc = graph + (vertex_id * vertex_size);
+      long *local args = args_scratch_space;
+      args[0] = score;
+      args[1] = orig_score;
+      args[2] = iter + 1;
+      send_dram_write(loc + 32, args, 3, evw_update_event(CEVNT, done_write));
+      yield;
+    }
+
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: done_write
+  // ---------------------------------------------------------------------------
+  // Called by: DRAM write completion (from done_left_final or done_right_final)
+  //
+  // After the score has been written to DRAM, computes the absolute delta
+  // between the new score and the original score (|score - orig_score|).
+  // Reports this delta to the parent thread via CCONT, along with:
+  //   - 0 (unused placeholder for degree)
+  //   - diff (the absolute score change)
+  //   - run_iter_top event word (for parent to forward next iteration signal)
+  //   - IGNRCONT (no continuation needed)
+  //
+  // NOTE: Uses run_iter_top (not run_iter) because after the first iteration,
+  //   this root node needs to update orig_score before forwarding to children.
+  // ---------------------------------------------------------------------------
+  event done_write() {
+
+    ASSERT_UDW_ZERO(counter);
+    // Compute absolute delta: |score - orig_score|
+    long diff = score - orig_score;
+    if (diff < 0) {       // Check sign bit (is diff negative?)
+      diff = 0 - diff;    // Negate to get absolute value
+    }
+
+    // Report to parent: (0, |delta|, run_iter_top_event, IGNRCONT)
+    send_event(CCONT, 0, diff, evw_update_event(CEVNT, run_iter_top), IGNRCONT);
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: run_iter  (INTERMEDIATE nodes — forwarding iteration signals)
+  // ---------------------------------------------------------------------------
+  // Called by: parent's run_iter or run_iter_top, which forwards the signal
+  //   down the edge split tree to all children.
+  //
+  // This event is used by INTERMEDIATE nodes in the recursive edge split tree
+  // (not the root — the root uses run_iter_top). It simply forwards the
+  // iteration signal to both children and resets state.
+  //
+  // If stop_if_neg_1 == -1: algorithm converged, forward -1 to children
+  //   and terminate this thread.
+  // Otherwise: reset score and counter, await new partial results from children.
+  // ---------------------------------------------------------------------------
+  event run_iter(long stop_if_neg_1) {
+    ASSERT_UDW_NON_ZERO(left_child);
+    ASSERT_UDW_NON_ZERO(right_child);
+    // Forward iteration signal to both children
+    send_event(left_child, stop_if_neg_1, IGNRCONT);
+    send_event(right_child, stop_if_neg_1, IGNRCONT);
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;  // Algorithm done — destroy this thread
+    }
+    score = 0;        // Reset accumulated score for new iteration
+    counter = 2;      // Expecting 2 child results again
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT: run_iter_top  (ROOT of per-vertex edge split tree)
+  // ---------------------------------------------------------------------------
+  // Called by: parent thread (e.g., process_vertexs_on_one_lane_KCORE_MULTI)
+  //   forwarding the iteration signal from TOP.
+  //
+  // This is used ONLY by the root node of the per-vertex edge split tree
+  // (the one created by `start`). Unlike intermediate `run_iter`, this event:
+  //   1. Increments the iteration counter
+  //   2. Saves current score as orig_score (for delta computation after
+  //      the next iteration's DRAM write in done_left_final/done_right_final)
+  //   3. Forwards the signal to both children
+  //   4. Resets score and counter
+  //
+  // After children complete, done_left_final/done_right_final will write the
+  // new combined score to DRAM and call done_write to report delta.
+  // ---------------------------------------------------------------------------
+  event run_iter_top(long stop_if_neg_1) {
+    iter = iter + 1;
+    ASSERT_UDW_NON_ZERO(left_child);
+    ASSERT_UDW_NON_ZERO(right_child);
+    orig_score = score;  // Save current score for delta after next iteration
+    // Forward iteration signal to both children
+    send_event(left_child, stop_if_neg_1, IGNRCONT);
+    send_event(right_child, stop_if_neg_1, IGNRCONT);
+
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;  // Algorithm done — destroy this thread
+    }
+    score = 0;
+
+    counter = 2;
+  }
+}

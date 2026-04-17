@@ -1,0 +1,180 @@
+#define MAX_OUTSTANDING_READ_REQUESTS 4096
+
+// #define DEBUG
+
+thread reset_deg_master {
+    unsigned long num_map_done;
+    unsigned long num_map;
+    unsigned long num_lanes_per_control;
+    unsigned long control_level;
+    unsigned long cont;
+    unsigned long num_empty;
+    long k;
+
+    
+    event start(unsigned long _num_lanes, unsigned long* _gv, unsigned long _num_verts, unsigned long _total_lanes, unsigned long log2_num_control_lane, unsigned long _control_level, long _k){
+        #ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start> _num_lanes = %lu, control_level = %lu", NETID, _num_lanes, _control_level);
+        #endif
+        unsigned long* local lmbuff = LMBASE;
+        if(_control_level == 0){
+            print("reset_deg Start");
+            lmbuff[0] = 0;
+        }
+        
+        cont = CCONT;
+        control_level = _control_level;
+        k = _k;
+
+        unsigned long num_masters = 1 << log2_num_control_lane;
+        num_lanes_per_control = _num_lanes - 1;
+        num_lanes_per_control = (num_lanes_per_control >> log2_num_control_lane) + 1;
+
+        if(num_lanes_per_control == 1){
+            num_map = _num_lanes;
+             // start start 
+            lmbuff = LMBASE + 16;
+            lmbuff[0] = _gv;
+            lmbuff[1] = _total_lanes;
+            lmbuff[2] = _num_verts;
+            lmbuff[3] = _k;
+
+            int netid = NETID;
+            int lane_end = netid + _num_lanes;
+            while(netid < lane_end){
+                long evword = evw_new(netid, reset_deg_worker::start);
+                send_event(evword, lmbuff, 4, start_done);
+                netid = netid + 1;
+            }
+        }else{
+            lmbuff = LMBASE + 16;
+            lmbuff[0] = num_lanes_per_control;
+            lmbuff[1] = _gv;
+            lmbuff[2] = _num_verts;
+            lmbuff[3] = _total_lanes;
+            lmbuff[4] = log2_num_control_lane;
+            lmbuff[5] = _control_level + 1;
+            lmbuff[6] = _k;
+
+            long mlane_id = NETID;
+            num_map = num_masters;
+            long lane_end = num_lanes_per_control * num_masters;
+            lane_end = lane_end + mlane_id;
+            while(mlane_id < lane_end){
+                long evword = evw_new(mlane_id, start);
+                send_event(evword, lmbuff, 7, start_done);
+                mlane_id = mlane_id + num_lanes_per_control;
+            }
+        }
+
+        num_map_done = 0;
+        num_empty = 0;
+        
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start> end", NETID);
+#endif
+        yield;
+    }
+
+
+    event start_done(long _num_empty){
+#ifdef DEBUG
+        print("[DEBUG][NWID %lu] <start_done> from :%lu, num_map_done :%lu, control_level: %lu", NETID, nwid, num_map_done, control_level);
+#endif
+        num_map_done = num_map_done + 1;
+        num_empty = num_empty + _num_empty;
+        
+        
+        if(num_map_done == num_map)
+        {
+            num_map_done = 0;
+            if(control_level == 0){
+                print("reset_deg End");
+                unsigned long* local lmbuff = LMBASE;
+                lmbuff[0] = 1;
+                lmbuff[1] = num_empty;
+                yield_terminate;
+            }
+            else{
+                send_event(cont, num_empty, IGNRCONT);
+                yield_terminate;
+            }
+        }     
+        yield;
+    }
+}
+
+
+thread reset_deg_worker {
+    long vid;
+    long num_verts;
+    long outstanding;
+    long total_lanes;
+    long *gv;
+    long cont;
+    unsigned long num_empty;
+    long k;
+
+    event start(unsigned long*_gv, unsigned long _total_lanes, unsigned long _num_verts, long _k){
+        vid = NETID;
+        num_verts = _num_verts;
+        outstanding = 0;
+        total_lanes = _total_lanes;
+        gv = _gv + 8;
+        cont = CCONT;
+        num_empty = 0;
+        k = _k;
+
+        for(vid = NETID; vid < num_verts; vid = vid + _total_lanes){
+            long *v_ptr = gv + (vid << 6);  // 8 words
+            send_dram_read(v_ptr, 4, v_return);
+            outstanding = outstanding + 1;
+            if(outstanding >= MAX_OUTSTANDING_READ_REQUESTS){
+                vid = vid + _total_lanes;
+                break;
+            }
+        }
+        if(outstanding == 0){
+            send_event(cont, num_empty, IGNRCONT);
+            yield_terminate;
+        }
+    }
+
+    event v_return(unsigned long _deg, unsigned long _edges_before, unsigned long _vid, unsigned long _real_deg, unsigned long *addr){
+        if(_real_deg < k) {
+            unsigned long* local lmbuff = LMBASE + 16;
+            lmbuff[0] = 0;
+            lmbuff[1] = _edges_before;
+            lmbuff[2] = _vid;
+            lmbuff[3] = 0;
+            send_dram_write(addr, lmbuff, 4, write_done);
+            num_empty = num_empty + 1;
+        }else{
+            if(vid < num_verts){
+                long *v_ptr = gv + (vid << 6);  // 8 words
+                send_dram_read(v_ptr, 4, v_return);
+                vid = vid + total_lanes;
+            }else{
+                outstanding = outstanding - 1;
+            }
+            if(outstanding == 0){
+                send_event(cont, num_empty, IGNRCONT);
+                yield_terminate;
+            }
+        }
+    }
+
+    event write_done(){
+        if(vid < num_verts){
+            long *v_ptr = gv + (vid << 6);  // 8 words
+            send_dram_read(v_ptr, 4, v_return);
+            vid = vid + total_lanes;
+        }else{
+            outstanding = outstanding - 1;
+        }
+        if(outstanding == 0){
+            send_event(cont, num_empty, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}

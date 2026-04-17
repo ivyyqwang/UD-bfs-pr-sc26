@@ -1,0 +1,6 @@
+#ifndef __BROADCAST_UDWH__
+#define __BROADCAST_UDWH__
+
+extern event Broadcast::start();
+
+#endif

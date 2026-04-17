@@ -1,0 +1,141 @@
+#include "broadcast.udwh"
+#include "kcore.udwh"
+// #define DEBUG_MARKVERTICES
+
+#define uint64_t unsigned long
+
+thread MarkVertices {
+	event start(uint64_t* src, uint64_t k, uint64_t numVertices, uint64_t numLanes) {
+
+
+		#ifdef DEBUG_MARKVERTICES
+			print("Start: src: %p, k: %lu, numVertices: %lu, numLanes: %lu", src, k, numVertices, numLanes);
+		#endif
+
+		// distribute the work among all lanes available
+		uint64_t evw = evw_new(NETID, Broadcast::start);
+		uint64_t cont = evw_update_event(CEVNT, done);
+		uint64_t evw_broadcast = evw_new(NETID, BroadcastWorker::start);
+
+		uint64_t* local spPtr = args_scratch_space;
+		spPtr[0] = numLanes;
+		spPtr[1] = evw_broadcast;
+		copyOperands(src, spPtr + 2*sizeof(long), 4);
+		
+		// length and destination address in the LM is configured in the Broadcast receiver
+		send_event(evw, spPtr, 8, cont);
+	}
+
+	event done(uint64_t numEmpty) {
+		#ifdef DEBUG_MARKVERTICES
+			print("MarkVertices finished, numEmpty: %lu", numEmpty);
+		#endif
+		uint64_t *local spPtr = args_scratch_space;
+		spPtr[0] = numEmpty;
+
+		EXIT;
+     	yield_terminate;
+	}
+}
+
+
+thread BroadcastWorker {
+	uint64_t *srcBase;
+	uint64_t numVertices;
+	uint64_t k;
+	uint64_t reqInFlight;
+	uint64_t numEmpty;
+
+	event start(uint64_t* srcBase_, uint64_t k_, uint64_t numVertices_, uint64_t numLanes) {
+
+		// determine the numVertices that this lane has to handle
+		uint64_t laneOffset;
+		uint64_t base = numVertices_ / numLanes;
+		uint64_t remainder = numVertices_ % numLanes;
+		if(NETID < remainder) {
+			numVertices = base + 1; 
+			laneOffset = NETID;
+		} else {
+			numVertices = base;
+			laneOffset = remainder;
+		}
+
+		if(numVertices == 0) {
+			send_event(CCONT, 0, IGNRCONT);
+			yield_terminate;
+		}
+		
+		// set the base addresses
+		uint64_t offsetStartAddress = (NETID * base + laneOffset) * sizeof(long) * 8; // size of vertex_t
+		srcBase = srcBase_ + offsetStartAddress + 8;
+
+		#ifdef DEBUG_MARKVERTICES
+			print("Start Worker: src: %p, k: %lu, numVertices: %lu, numLanes: %lu", srcBase_, k_, numVertices_, numLanes);
+			print("\tsrcBase: %p, numVertices: %lu, remainder: %lu", srcBase, numVertices, remainder);
+		#endif
+
+		reqInFlight = 0;
+		numEmpty = 0;
+		k = k_;
+
+		uint64_t cont = evw_update_event(CEVNT, returnFromRead);
+		for(uint64_t i=0; i<MAX_OUTSTANDING_READ_REQUESTS && numVertices>0; i++) {
+			send_dram_read(srcBase, 4, returnFromRead);
+			srcBase = srcBase + vertex_size;
+			numVertices--;
+			reqInFlight++;
+		}
+	}
+
+	event returnFromRead(uint64_t degree, uint64_t edges_before, uint64_t vertexID, uint64_t scratch1, uint64_t* readAddress) {
+		#ifdef DEBUG_MARKVERTICES
+			print("ID: %lu, degree: %lu, scratch1: %lu, edgesBefore: %lu", vertexID, degree, scratch1, edges_before);
+		#endif
+
+		if(degree == 0 && scratch1 == 0) {
+			numEmpty++;
+		} elif(degree < k || scratch1 < k) {
+			uint64_t* local spPtr = args_scratch_space;
+			spPtr[0] = 0;
+			spPtr[1] = edges_before;
+			spPtr[2] = vertexID;
+			spPtr[3] = 0;
+
+			send_dram_write(readAddress, spPtr, 4, returnFromWrite);
+			reqInFlight++;
+			numEmpty++;
+		} else {
+			// ERROR, if scratch1 > degree
+			long test = degree - scratch1;
+			ASSERT_UDW_NON_NEGATIVE(test);
+		}
+		
+		if(numVertices != 0) {
+			send_dram_read(srcBase, 4, CEVNT);
+			srcBase = srcBase + vertex_size;
+			numVertices--;
+		} else {
+			reqInFlight--;
+			if(reqInFlight == 0) {
+				#ifdef DEBUG_MARKVERTICES
+					print("done: numEmpty: %lu", numEmpty);
+				#endif
+				// inform the broadcast library that we are done
+				send_event(CCONT, numEmpty, IGNRCONT);
+				yield_terminate;
+			}
+		}
+	}
+
+	event returnFromWrite() {
+		reqInFlight--;
+		if(reqInFlight == 0) {
+			#ifdef DEBUG_MARKVERTICES
+				print("done: numEmpty: %lu", numEmpty);
+			#endif
+			// inform the broadcast library that we are done
+			send_event(CCONT, numEmpty, IGNRCONT);
+			yield_terminate;
+		}
+	}
+}

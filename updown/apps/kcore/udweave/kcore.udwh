@@ -1,0 +1,319 @@
+// =============================================================================
+// kcore.udwh — Header/macros for the K-Core UpDown accelerator kernel
+// =============================================================================
+//
+// This header defines constants, memory layout, and utility macros used by
+// kcore.udw. It establishes:
+//   1. Scratchpad memory layout (how the lane's 64KB local memory is partitioned)
+//   2. Vertex struct size and work-balancing parameters
+//   3. Lane encoding helpers (FAKE_SPREAD/COMBINE_LANES)
+//   4. Child-data management macros (for tracking sub-tasks in the split tree)
+//   5. Batched DRAM read macros (array_loadN) for reading neighbor vertex data
+//   6. Assert macros for debugging
+//
+// MEMORY LAYOUT (per-lane scratchpad):
+// ┌──────────────────────────────────┐  offset 0
+// │  TOP_FLAG_OFFSET (1 word)        │  ← EXIT writes 1 here to signal TOP
+// │  ... (reserved/unused) ...       │
+// ├──────────────────────────────────┤  offset HEAP_OFFSET (1600)
+// │  ... (64 bytes gap) ...          │
+// ├──────────────────────────────────┤  offset HEAP_OFFSET+64 = 1664
+// │  args_scratch_space (128 bytes)  │  ← temp buffer for building event args
+// ├──────────────────────────────────┤  offset HEAP_OFFSET+64+128 = 1792
+// │  ... (128 bytes gap) ...         │
+// ├──────────────────────────────────┤  offset HEAP_OFFSET+64+128+128 = 1920
+// │  child_data_location             │  ← per-thread child tracking data
+// │  (indexed by TID * DATA_PER_THREAD)
+// └──────────────────────────────────┘
+//
+// TOP also reads back results from the scratchpad after each iteration:
+//   - HEAP_OFFSET+64   (offset 1664): max_delta (double) — max score change
+//   - HEAP_OFFSET+80   (offset 1680): next_thread_id — event word for run_iter
+//
+// VERTEX STRUCT IN DRAM (vertex_size = 64 bytes = 8 words of 8 bytes):
+//   offset  0: dests       — pointer to neighbor list in DRAM
+//   offset  8: degree      — edge count (set to 0 when vertex is deleted)
+//   offset 16: edges_before— cumulative edges before this vertex (for splitting)
+//   offset 24: vertex_id   — this vertex's ID
+//   offset 32: scratch1    — current iteration score (as double)
+//   offset 40: scratch2    — previous iteration score / orig_score (as double)
+//   offset 48: scratch3    — iteration number
+//   offset 56: scratch4    — unused
+//
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Scratchpad layout constants
+// ---------------------------------------------------------------------------
+
+// Offset in scratchpad where EXIT writes a 1 to signal the TOP (host) core
+// that the UpDown program has finished the current iteration.
+#define TOP_FLAG_OFFSET     0
+
+// Start of the heap region in scratchpad. Below this is reserved for
+// system use (thread state, etc.). The usable scratch area begins here.
+#define HEAP_OFFSET         1600
+
+// ---------------------------------------------------------------------------
+// Data structure sizes and work-balancing parameters
+// ---------------------------------------------------------------------------
+
+// Bytes of scratchpad reserved per thread for child tracking data.
+// Used by the 8-way splitter (split_vertexsKCORE_MULTI) which has up to
+// 8 children, each needing 3 words (24 bytes) → 8*3 = 24 words, but
+// rounded up to 30 words * 8 bytes = 240 bytes per thread.
+// 8 children each with three words of data each taking 8 bytes
+// can also be 6 children each with 4 words of data each taking 8 bytes
+// can also be 6 childen with 5 words each
+#define DATA_PER_THREAD (30 * 8)
+
+// Size of one vertex_t struct in bytes: 8 fields * 8 bytes each = 64 bytes.
+// Used for pointer arithmetic when iterating through the vertex array in DRAM.
+#define vertex_size (8 * 8)
+
+// Weight factor for vertices (vs edges) when computing proportional lane
+// allocation. Total work for a region = VERTEX_WORK_FACTOR * N + M, where
+// N = number of vertices, M = number of edges. This accounts for per-vertex
+// overhead (reading the struct, writing results) beyond just edge processing.
+#define VERTEX_WORK_FACTOR 8
+
+// For the first FORCE_FIRST_NODE levels of recursion in the split tree,
+// force the lane target to stay within the first 2048 logical lanes
+// (via modulo). This helps ensure initial splits spread across nodes
+// before going deeper.
+#define FORCE_FIRST_NODE 3
+
+// Maximum number of outstanding (in-flight) DRAM read requests when reading
+// a vertex's neighbor list. Limits memory pressure by not issuing all reads
+// at once for high-degree vertices. Each read fetches 8 neighbor IDs (64 bytes).
+#define MAX_OUTSTANDING_READ_REQUESTS 10
+
+// ---------------------------------------------------------------------------
+// Scratchpad pointer macros
+// ---------------------------------------------------------------------------
+
+// Pointer to a temporary argument buffer in scratchpad, used to build
+// event argument arrays before calling send_event(). Located at
+// LMBASE + HEAP_OFFSET + 64 = LMBASE + 1664. Has room for ~16 words (128 bytes).
+// This is also where TOP reads back results:
+//   args[0] at offset 1664 = max_delta
+//   args[2] at offset 1680 = next_thread_id (TID for run_iter)
+#define args_scratch_space (LMBASE + (HEAP_OFFSET + 64))
+
+// Pointer to the per-thread child data region in scratchpad.
+// Located at LMBASE + 1920. Each thread uses TID * DATA_PER_THREAD bytes.
+// Stores child event words, edge counts, scores, etc. for the 8-way and
+// binary splitters and the multi-vertex-per-lane processor.
+#define child_data_location (LMBASE + (((HEAP_OFFSET + 64) + 128) + 128))
+
+// ---------------------------------------------------------------------------
+// Lane encoding macros
+// ---------------------------------------------------------------------------
+// The UpDown network ID encodes which lane to target. These macros convert
+// between a "logical lane count" and the actual network ID encoding.
+// FAKE_SPREAD_LANES: converts a lane count to the network-ID-scaled value
+//   (left-shift by 5, i.e., multiply by 32)
+// FAKE_COMBINE_LANES: converts a network-ID-scaled value back to a lane index
+//   (right-shift by 5, i.e., divide by 32)
+// These are used when computing target lane IDs for evw_new().
+#define FAKE_SPREAD_LANES(lane) ((lane) << 5)
+#define FAKE_COMBINE_LANES(lane) ((lane) >> 5)
+
+// Threshold for choosing between the 8-way splitter and the binary splitter.
+// If num_lanes > SWITCH_TO_SPLIT_2 (expressed in FAKE_SPREAD form), use the
+// 8-way splitter (split_vertexsKCORE_MULTI); otherwise use the binary
+// splitter (split_vertexs2KCORE_MULTI).
+#define SWITCH_TO_SPLIT_2 2048
+
+
+#define uint64_t unsigned long
+#define uint32_t unsigned int
+
+
+// ---------------------------------------------------------------------------
+// Assert macros for debugging
+// ---------------------------------------------------------------------------
+// When ENABLE_ASSERTS == 1, these macros check conditions and crash via
+// divide-by-zero (divi X16 X16 0) if violated, printing a diagnostic message.
+// When disabled, they compile to empty if(1){} blocks (zero overhead due to
+// UDWeave's if(1) optimization).
+
+#define ENABLE_ASSERTS 1
+
+#if ENABLE_ASSERTS == 1
+#define ASSERT_UDW_NON_ZERO(value)                                             \
+  if ((value) == 0) {                                                          \
+    print(#value " had a value of zero, required nonzero");                    \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_EQUAL(v1, v2)                                               \
+  if ((v1) != (v2)) {                                                          \
+    print(#v1 " did not equal " #v2);                                          \
+    print(#v1 " = %d, " #v2 " = %d", v1, v2);                                  \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_ZERO(value)                                                 \
+  if ((value) != 0) {                                                          \
+    print(#value " did not had a value of zero, required zero");               \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_NON_NEGATIVE(value)                                         \
+  if ((value) < 0) {                                                           \
+    print(#value " had a value of %d, required non negative", value);          \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#else
+#define ASSERT_UDW_NON_ZERO(value)                                             \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_EQUAL(v1, v2)                                               \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_ZERO(value)                                                 \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_NON_NEGATIVE(value)                                         \
+  if (1) {                                                                     \
+  }
+#endif
+
+
+// ---------------------------------------------------------------------------
+// EXIT macro — signals completion to the TOP (host) core
+// ---------------------------------------------------------------------------
+// Writes 1 to scratchpad[TOP_FLAG_OFFSET]. The TOP core polls this address
+// via rt->test_wait_addr(nwid, TOP_FLAG_OFFSET, 1) and proceeds when it
+// reads 1. Used by KCORE_MULTI_main::done and ::run_iter to signal that
+// one iteration of the UpDown computation is complete.
+#define EXIT                                                                   \
+  unsigned long *local spPtrExit = LMBASE;                                     \
+  spPtrExit[TOP_FLAG_OFFSET] = 1
+
+// ---------------------------------------------------------------------------
+// Child data access macros (for the splitter threads)
+// ---------------------------------------------------------------------------
+// The splitter threads (split_vertexsKCORE_MULTI, split_vertexs2KCORE_MULTI)
+// track their children's event words in a scratchpad array. Each child
+// occupies 3 words (24 bytes): [event_word, reserved, reserved].
+// These macros provide array-like access indexed by child number (0-7).
+//
+// local_child_data_ptr(ptr): Sets ptr to the child data base address for
+//   the current thread (child_data_location + TID * DATA_PER_THREAD).
+//   Uses if(1) to create a scope for the temporary computation.
+#define local_child_data_ptr(ptr)                                              \
+  if (1) {                                                                     \
+    ptr = child_data_location;                                                 \
+    ptr = ptr + (TID * DATA_PER_THREAD);                                       \
+  }
+
+// ref_child_event(ptr, num): Direct array access to child #num's event word.
+//   ptr must already point to the child data base for this thread.
+//   Stride is 3 words per child (event_word at offset 0).
+#define ref_child_event(ptr, num) ptr[0 + (num * 3)]
+
+// set_child_event(child, num): Store an event word for child #num.
+//   Computes the child data pointer internally (allocates a temp register).
+#define set_child_event(child, num)                                            \
+  if (1) {                                                                     \
+    unsigned long *local args_UNIQUE_ID = child_data_location;                 \
+    args_UNIQUE_ID = args_UNIQUE_ID + (TID * DATA_PER_THREAD);                 \
+    args_UNIQUE_ID[0 + (num * 3)] = child;                                     \
+  }
+
+// get_child_event(child, num): Load the event word for child #num into `child`.
+//   Computes the child data pointer internally.
+#define get_child_event(child, num)                                            \
+  if (1) {                                                                     \
+    unsigned long *local args_UNIQUE_ID = child_data_location;                 \
+    args_UNIQUE_ID = args_UNIQUE_ID + (TID * DATA_PER_THREAD);                 \
+    child = args_UNIQUE_ID[0 + (num * 3)];                                     \
+  }
+
+// ---------------------------------------------------------------------------
+// Batched DRAM read macros (array_loadN)
+// ---------------------------------------------------------------------------
+// These macros issue multiple DRAM read requests for neighbor vertex structs.
+// Used after reading a batch of neighbor IDs (data0..data7) from the neighbor
+// list: for each neighbor ID, we need to read that neighbor's vertex struct
+// from the graph array to check its degree (alive or deleted?).
+//
+// array_load(array, offset, scale, size, cont):
+//   Issues a single send_dram_read for the vertex at array[offset].
+//   - array: base of the graph vertex array in DRAM
+//   - offset: the neighbor's vertex ID
+//   - scale: vertex_size (64 bytes) — stride between vertices
+//   - size: number of words to read (7 = first 7 fields of vertex_t, 56 bytes)
+//   - cont: continuation event word — the event that receives the read data
+//
+// array_loadN: Issues N parallel DRAM reads using the token-pasting operator
+//   (##) to construct variable names data0, data1, ... dataN-1 from the
+//   base_var_offset prefix. For example, array_load8(graph, data, ...) expands
+//   to 8 calls reading graph[data0], graph[data1], ..., graph[data7].
+//   Each read returns the vertex struct data to the continuation event.
+
+#define array_load(array, offset, scale, size, cont)                           \
+  if (1) {                                                                     \
+    send_dram_read((array) + (offset * scale), size, cont);                    \
+  }
+
+#define array_load8(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+    array_load(array, base_var_offset##5, scale, size, cont);                  \
+    array_load(array, base_var_offset##6, scale, size, cont);                  \
+    array_load(array, base_var_offset##7, scale, size, cont);                  \
+  }
+#define array_load7(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+    array_load(array, base_var_offset##5, scale, size, cont);                  \
+    array_load(array, base_var_offset##6, scale, size, cont);                  \
+  }
+#define array_load6(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+    array_load(array, base_var_offset##5, scale, size, cont);                  \
+  }
+#define array_load5(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+  }
+#define array_load4(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+  }
+#define array_load3(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+  }
+#define array_load2(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+  }
+

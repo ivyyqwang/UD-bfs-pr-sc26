@@ -1,0 +1,36 @@
+#ifndef __PREFIX_SUM_UDWH__
+#define __PREFIX_SUM_UDWH__
+#include "kcore.udwh"
+#include "LMStaticMap.udwh"
+
+// #define DEBUG_PREFIXSUM
+
+#define THRESHOLD_NODE_BC 64
+
+#if THRESHOLD_NODE_BC < 4
+	#error "THRESHOLD_NODE_BC is too small. Needs to be larger than 2."
+#endif
+
+#define COPY_OPERANDS 2
+#define SEND_OPERANDS 3 /* COPY_OPERANDS+1 */
+#define NUM_LANE_INDEX 2
+
+// size: (max (16384 / THRESHOLD_NODE_BC) + 1) * 8 Bytes each entries
+#define SPM_ADDRESS_MASTER 128
+
+ // size: 1 entry per node + 1 (max THRESHOLD_NODE_BC * 8 Bytes)
+#define SPM_ADDRESS_ABOVE_NODELEVEL (SPM_ADDRESS_MASTER + ((16384 / THRESHOLD_NODE_BC + 1) * 8))
+
+// size: (32 + 1) (UDs) * 8
+#define SPM_ADDRESS_NODE (SPM_ADDRESS_ABOVE_NODELEVEL + ((THRESHOLD_NODE_BC + 1) * 8))
+
+// size: (64 + 1) (Lanes/UD) * 8
+#define SPM_ADDRESS_UD (SPM_ADDRESS_NODE + ((32 + 1) * 8))
+
+// size: (MAX_OUTSTANDING_READ_REQUESTS + 1) * 8
+#define SPM_ADDRESS_LANE (SPM_ADDRESS_UD + ((64 + 1) * 8))
+
+// how many vertices to load in the lane in a batch
+#define MAX_OUTSTANDING_MEM_READ_REQUESTS 32
+
+#endif

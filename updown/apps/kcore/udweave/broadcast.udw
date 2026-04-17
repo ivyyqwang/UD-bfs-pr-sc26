@@ -1,0 +1,177 @@
+#include "kcore.udwh"
+
+#define THRESHOLD_NODE_BC 32
+
+// #define DEBUG_BROADCAST
+
+thread Broadcast {
+	uint64_t counter;
+	uint64_t sum;
+
+	event start(uint64_t numLanes, uint64_t bcEventWord, uint64_t data0, uint64_t data1, 
+	            uint64_t data2, uint64_t data3, uint64_t data4, uint64_t data5) {
+
+
+		uint64_t* local spPtr = args_scratch_space;
+		copyOperands(bcEventWord, spPtr+sizeof(long), 7);
+
+		sum = 0;
+		
+		uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+		if(numLanes >= (THRESHOLD_NODE_BC * 2048)) {	
+			// determine the number of lanes that the next level of tree nodes have to handle each
+			uint64_t numLanesForNextLevel = numLanes / THRESHOLD_NODE_BC;
+			spPtr[0] = numLanesForNextLevel;
+			counter = 0;
+		
+			for(uint64_t i=0; i<numLanes; i=i+numLanesForNextLevel) {
+				uint64_t evw = evw_new(NETID+i, BroadcastAboveNodeLevel::start);
+				send_event(evw, spPtr, 8, cont);
+				counter++;
+				#ifdef DEBUG_BROADCAST
+					print("Sending BC to NETID: %lu", NETID+i);
+				#endif
+			}
+			yield;
+		}
+
+		counter = 1;
+		uint64_t evw = evw_new(NETID, BroadcastAboveNodeLevel::start);
+		spPtr[0] = numLanes;
+		send_event(evw, spPtr, 8, cont);
+
+		yield;
+	}
+
+	event returnFromChild(uint64_t returnValue) {
+		counter--;
+		sum = sum + returnValue;
+		#ifdef DEBUG_BROADCAST
+			print("Returning: returnValue: %lu, part sum: %lu", returnValue, sum);
+		#endif
+		if(counter == 0) {
+			uint64_t* local spPtr = args_scratch_space;
+			spPtr[0] = sum;
+			EXIT;
+			yield_terminate;
+		}
+	}
+}
+
+
+// distribute to the nodes
+thread BroadcastAboveNodeLevel {
+	uint64_t counter;
+	uint64_t sum;
+
+	event start(uint64_t numLanes, uint64_t bcEventWord, uint64_t data0, uint64_t data1, 
+	            uint64_t data2, uint64_t data3, uint64_t data4, uint64_t data5) {
+
+		uint64_t* local spPtr = args_scratch_space;
+		copyOperands(bcEventWord, spPtr+sizeof(long), 7);
+		spPtr[0] = 2048;
+		counter = 0;
+		sum = 0;
+		
+		uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+		uint64_t upperLimit = THRESHOLD_NODE_BC * 2048;
+        if(upperLimit > numLanes) {
+            upperLimit = numLanes;
+        }
+        for(uint64_t i=0; i<upperLimit; i=i+2048) {
+			uint64_t evw = evw_new(NETID+i, BroadcastNodeLevel::start);
+			send_event(evw, spPtr, 8, cont);
+			counter++;
+			#ifdef DEBUG_BROADCAST
+				print("Sending BC to NETID: %lu", NETID+i);
+			#endif
+		}
+	}
+
+	event returnFromChild(uint64_t returnValue) {
+		counter--;
+		sum = sum + returnValue;
+		#ifdef DEBUG_BROADCAST
+			print("Returning: returnValue: %lu, part sum: %lu", returnValue, sum);
+		#endif
+		if(counter == 0) {
+			send_event(CCONT, sum, IGNRCONT);
+			yield_terminate;
+		}
+	}
+}
+
+
+// distribute among UDs
+thread BroadcastNodeLevel {
+	uint64_t counter;
+	uint64_t sum;
+
+	event start(uint64_t numLanes, uint64_t bcEventWord, uint64_t data0, uint64_t data1, 
+	            uint64_t data2, uint64_t data3, uint64_t data4, uint64_t data5) {
+
+		uint64_t* local spPtr = args_scratch_space;
+		copyOperands(bcEventWord, spPtr+sizeof(long), 7);
+		spPtr[0] = 64;
+		counter = 0;
+		sum = 0;
+
+		uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+		for(uint64_t i=0; i<numLanes; i=i+64) {
+			uint64_t evw = evw_new(NETID+i, BroadcastUDLevel::start);
+			send_event(evw, spPtr, 8, cont);
+			counter++;
+			#ifdef DEBUG_BROADCAST
+				print("Sending BC to NETID: %lu", NETID+i);
+			#endif
+		}
+	}
+
+	event returnFromChild(uint64_t returnValue) {
+		counter--;
+		sum = sum + returnValue;
+		#ifdef DEBUG_BROADCAST
+			print("Returning: returnValue: %lu, part sum: %lu", returnValue, sum);
+		#endif
+		if(counter == 0) {
+			send_event(CCONT, sum, IGNRCONT);
+			yield_terminate;
+		}
+	}
+}
+
+// distribute among the lanes
+thread BroadcastUDLevel {
+	uint64_t counter;
+	uint64_t sum;
+
+	event start(uint64_t numLanes, uint64_t bcEventWord, uint64_t data0, uint64_t data1, 
+	            uint64_t data2, uint64_t data3, uint64_t data4, uint64_t data5) {
+
+		sum = 0;
+		counter = numLanes;
+		
+		uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+		for(uint64_t i=0; i<numLanes; i++) {
+
+			uint64_t evw = evw_update_netid(bcEventWord, i+NETID);
+			send_ops(evw, data0, 8, cont);
+			#ifdef DEBUG_BROADCAST
+				print("Sending BC to NETID: %lu", NETID+i);
+			#endif
+		}
+	}
+
+
+	event returnFromChild(uint64_t returnValue) {
+		counter--;
+		sum = sum + returnValue;
+		#ifdef DEBUG_BROADCAST
+			print("Returning: returnValue: %lu, part sum: %lu", returnValue, sum);
+		#endif
+		if(counter == 0) {
+			send_event(CCONT, sum, IGNRCONT);
+			yield_terminate;
+		}
+	}
+}

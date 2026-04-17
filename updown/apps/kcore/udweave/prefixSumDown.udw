@@ -1,0 +1,299 @@
+#include "prefixSum.udwh"
+
+
+// distribute to the nodes
+thread PrefixSumDownAboveNodeLevel {
+    uint64_t counter;
+    uint64_t maxDegree;
+
+    event start(uint64_t* vertex, uint64_t numVertices, uint64_t numLanes, uint64_t prefixSum_) {
+
+        counter = 0;
+        maxDegree = 0;
+        uint64_t prefixSum = prefixSum_;
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu, prefixSum: %lu", vertex, numVertices, numLanes, prefixSum_);
+        #endif
+
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_ABOVE_NODELEVEL;
+        uint64_t* local spPtrSend = LMBASE + SEND_BUFFER_OFFSET;
+        copyOperands(vertex, spPtrSend, 3);
+        
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        uint64_t upperLimit = THRESHOLD_NODE_BC * 2048;
+        if(upperLimit > numLanes) {
+            upperLimit = numLanes;
+        }
+        for(uint64_t i=0; i<upperLimit; i=i+2048) {
+            prefixSum = prefixSum + spPtr[counter];
+            spPtrSend[3] = prefixSum;
+
+            uint64_t evw = evw_new(NETID+i, PrefixSumDownNodeLevel::start);
+            send_event(evw, spPtrSend, 4, cont);
+            counter++;
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending prefixSum (%lu) to NETID: %lu", prefixSum, NETID+i);
+            #endif
+        }
+    }
+
+    event returnFromChild(uint64_t maxDegree_) {
+        if(maxDegree_ > maxDegree) {
+            maxDegree = maxDegree_;
+        }
+        counter--;
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: maxDegree: %lu, remaining: %lu", maxDegree, counter);
+        #endif
+        if(counter == 0) {
+            send_event(CCONT, maxDegree, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}
+
+
+// distribute among UDs
+thread PrefixSumDownNodeLevel {
+    uint64_t counter;
+    uint64_t maxDegree;
+
+    event start(uint64_t* vertex, uint64_t numVertices, uint64_t numLanes, uint64_t prefixSum_) {
+
+        counter = 0;
+        maxDegree = 0;
+        uint64_t prefixSum = prefixSum_;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu, prefixSum: %lu", vertex, numVertices, numLanes, prefixSum_);
+        #endif
+
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_NODE;
+        uint64_t* local spPtrSend = LMBASE + SEND_BUFFER_OFFSET;
+        copyOperands(vertex, spPtrSend, 3);
+
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        uint64_t numLanesPerNode = 2048;
+        for(uint64_t i=0; i<numLanesPerNode; i=i+64) {
+            prefixSum = prefixSum + spPtr[counter];
+            spPtrSend[3] = prefixSum;
+
+            uint64_t evw = evw_new(NETID+i, PrefixSumDownUDLevel::start);
+            send_event(evw, spPtrSend, 4, cont);
+            counter++;
+
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending prefixSum (%lu) to NETID: %lu", prefixSum, NETID+i);
+            #endif
+        }
+    }
+
+    event returnFromChild(uint64_t maxDegree_) {
+        if(maxDegree_ > maxDegree) {
+            maxDegree = maxDegree_;
+        }
+
+        counter--;
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: maxDegree: %lu, remaining: %lu", maxDegree, counter);
+        #endif
+        if(counter == 0) {
+            send_event(CCONT, maxDegree, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}
+
+// distribute among the lanes
+thread PrefixSumDownUDLevel {
+    uint64_t counter;
+    uint64_t maxDegree;
+
+    event start(uint64_t* vertex, uint64_t numVertices, uint64_t numLanes, uint64_t prefixSum_) {
+
+        counter = 64;
+        maxDegree = 0;
+        uint64_t prefixSum = prefixSum_;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu, prefixSum: %lu", vertex, numVertices, numLanes, prefixSum_);
+        #endif
+
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_UD;
+        uint64_t* local spPtrSend = LMBASE + SEND_BUFFER_OFFSET;
+        copyOperands(vertex, spPtrSend, 3);
+
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        uint64_t numLanesPerUD = 64;
+        for(uint64_t i=0; i<numLanesPerUD; i++) {
+            prefixSum = prefixSum + spPtr[i];
+            spPtrSend[3] = prefixSum;
+
+            uint64_t evw = evw_new(NETID+i, PrefixSumDownWorker::start);
+            send_event(evw, spPtrSend, 4, cont);
+
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending prefixSum (%lu) to NETID: %lu", prefixSum, NETID+i);
+            #endif
+        }
+    }
+
+
+    event returnFromChild(uint64_t maxDegree_) {
+        if(maxDegree_ > maxDegree) {
+            maxDegree = maxDegree_;
+        }
+        counter--;
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: maxDegree: %lu, remaining: %lu", maxDegree, counter);
+        #endif
+        if(counter == 0) {
+            send_event(CCONT, maxDegree, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}
+
+
+thread PrefixSumDownWorker {
+    uint64_t *curAddressBlock;
+    uint64_t curVertexID;
+    uint64_t numVertices;
+    uint64_t counter;
+    uint64_t expectedReturnValues;
+    uint64_t prefixSum;
+    uint64_t maxDegree;
+    
+    event start(uint64_t* srcBase_, uint64_t numVertices_, uint64_t numLanes, uint64_t prefixSum_) {
+        
+        // determine the numVertices
+        uint64_t laneOffset;
+        uint64_t base = numVertices_ / numLanes;
+        uint64_t remainder = numVertices_ % numLanes;
+        if(NETID < remainder) {
+            numVertices = base + 1; 
+            laneOffset = NETID;
+        } else {
+            numVertices = base;
+            laneOffset = remainder;
+        }
+
+        #ifdef DEBUG_PREFIXSUM
+            print("Start: src: %p, numVertices: %lu, numLanes: %lu, prefixSum: %lu", srcBase_, numVertices_, numLanes, prefixSum_);
+        #endif
+
+        if(numVertices == 0) {
+            send_event(CCONT, 0, IGNRCONT);
+            yield_terminate;
+        }
+        
+        prefixSum = prefixSum_;
+
+        // set the base addresses
+        curVertexID = (NETID * base + laneOffset);
+        curAddressBlock = srcBase_ + curVertexID * vertex_size;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("\tsrcBase: %p, numVertices: %lu, remainder: %lu, startVertexID: %lu", curAddressBlock, numVertices, remainder, curVertexID);
+        #endif
+
+        uint64_t* curReadingAddress = curAddressBlock + 8;  // point to where the degree is
+        counter = 0;
+        maxDegree = 0;
+
+        uint64_t cont = evw_update_event(CEVNT, returnFromRead);
+        for(uint64_t i=0; i<MAX_OUTSTANDING_MEM_READ_REQUESTS && numVertices>0; i++) {
+            #ifdef DEBUG_PREFIXSUM
+                send_dram_read(curReadingAddress, 3, cont);
+            #else
+                send_dram_read(curReadingAddress, 1, cont);
+            #endif
+            curReadingAddress = curReadingAddress + vertex_size;
+            numVertices--;
+            counter++;
+        }
+        expectedReturnValues = counter;
+    }
+
+    #ifdef DEBUG_PREFIXSUM
+    event returnFromRead(uint64_t degree, uint64_t edgeBef, uint64_t vertID, uint64_t* readAddress) {
+    #else
+    event returnFromRead(uint64_t degree, uint64_t* readAddress) {
+    #endif
+
+        // determine, which vertex has been read
+        uint64_t index = (readAddress - curAddressBlock);
+        index = index / vertex_size + 1; // shift by 1, since the first element of the prefix sum should be 0
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_LANE;
+        spPtr[index] = degree;
+        counter--;
+
+        if(degree > maxDegree) {
+            maxDegree = degree;
+        }
+
+        #ifdef DEBUG_PREFIXSUM
+            print("Vertex returned: ID: %lu, spPtr[%lu] = %lu", vertID, index, degree);
+        #endif
+
+        if(counter == 0) {
+            uint64_t* local spPtrSend = LMBASE + SEND_BUFFER_OFFSET;
+            spPtrSend[2] = 1;   // vert->scratch1 = starting_value -> k=1
+            spPtrSend[3] = 0;   // vert->scratch2 = 0;
+            spPtrSend[4] = 0;   // vert->scratch3 = 0;
+            spPtrSend[5] = 0;   // vert->scratch4 = 0;
+            
+            uint64_t cont = evw_update_event(CEVNT, returnFromWrite);
+            // compute the prefixSum
+            for(uint64_t i=0; i<expectedReturnValues; i++) {
+                prefixSum = prefixSum + spPtr[i];
+                spPtrSend[0] = prefixSum;
+                spPtrSend[1] = curVertexID+i; // rewrite the vertexID (should be the same)
+
+                #ifdef DEBUG_PREFIXSUM
+                    print("Writing: [0]=%lu, [1]=%lu @ %p", prefixSum, curVertexID+i, curAddressBlock);
+                #endif
+
+                // write the data
+                // FOR DEBUGGING. You can store the data into the scratch fields and then compare it with the existing data
+                // send_dram_write(curAddressBlock + 32 /* point to edges_before */, spPtrSend, 2, cont);
+                send_dram_write(curAddressBlock + 16 /* point to edges_before */, spPtrSend, 6, cont);
+
+                curAddressBlock = curAddressBlock + vertex_size;
+            }
+
+            counter = expectedReturnValues;
+            prefixSum = prefixSum + spPtr[expectedReturnValues];
+
+            // move up the block
+            curVertexID = curVertexID + expectedReturnValues;
+        }
+    }
+
+    event returnFromWrite() {
+        counter--;
+
+        if(counter == 0) {
+            // send the next batch
+            if(numVertices > 0) {
+                uint64_t* curReadingAddress = curAddressBlock + 8;  // point to where the degree is
+                uint64_t cont = evw_update_event(CEVNT, returnFromRead);
+                for(uint64_t i=0; i<MAX_OUTSTANDING_MEM_READ_REQUESTS && numVertices>0; i++) {
+                    #ifdef DEBUG_PREFIXSUM
+                        send_dram_read(curReadingAddress, 3, cont);
+                    #else
+                        send_dram_read(curReadingAddress, 1, cont);
+                    #endif
+                    curReadingAddress = curReadingAddress + vertex_size;
+                    numVertices--;
+                    counter++;
+                }
+                expectedReturnValues = counter;
+                yield;
+            }
+            // we are done
+            send_event(CCONT, maxDegree, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}

@@ -1,0 +1,9 @@
+*.py
+preprocess
+kcore
+kcore.assembly
+kcore.o
+kcore_cpu
+kcore_exe.hpp
+kcore_exe.symbol_table
+kcore_exe.bin.logs/
