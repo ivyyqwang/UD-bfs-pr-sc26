@@ -70,14 +70,14 @@ thread vertex_master {
         yield;
     }
 
-    event v_return(long _degree, long _orig_vid, long _vid, long* _neighbors, long _distance, long _parent, long _split_range, long _padding) {
+    event v_return(long _degree, long _vid, long* _neighbors, long _orig_vid, long _split_start, long _split_end, long _parent, long _distance) {
         #ifdef DEBUG
         print("[DEBUG][NWID %lu] <v_return> vid:%lu, distance:%lu, return_value:%lu", NETID, _vid, _distance, return_value);
         #endif
 
         #ifdef DEBUG
         if(NETID == LANEID){
-            print("[DEBUG][NWID %lu] <v_return> vid:%lu, _orig_vid:%lu, _degree:%lu, _split_range:%lu", NETID, _vid,  _orig_vid, _degree, _split_range);
+            print("[DEBUG][NWID %lu] <v_return> vid:%lu, _orig_vid:%lu, _degree:%lu, _split_start:%lu", NETID, _vid,  _orig_vid, _degree, _split_start);
         }
         #endif
 
@@ -105,8 +105,8 @@ thread vertex_master {
         if(return_value == 2){
             /* update vertex structure */
             long *v_ptr = g_v + (vid << 6);
-            v_ptr = v_ptr + 32;
-            send_dram_write(v_ptr, itera, parent, v_neighs_return);
+            v_ptr = v_ptr + 48;
+            send_dram_write(v_ptr, parent, itera, v_neighs_return);
             count = count + 1;
             // lmbuff[hash_id] = vid;
             // lmbuff[hash_id+1] = itera;
@@ -134,11 +134,11 @@ thread vertex_master {
         }
 
          /* no split vertex*/
-        if(_split_range == 0){ 
+        if(_split_end == 0){ 
             /* update vertex structure */
             long *v_ptr = g_v + (vid << 6);
-            v_ptr = v_ptr + 32;
-            send_dram_write(v_ptr, itera, parent, v_neighs_return);
+            v_ptr = v_ptr + 48;
+            send_dram_write(v_ptr, parent, itera, v_neighs_return);
             count = count + 1;
             return_value = 1;
             // lmbuff[hash_id] = vid;
@@ -160,8 +160,8 @@ thread vertex_master {
             yield;
         }
         /* split vertex */
-        long split_vid = (_split_range >> 32) & 0xffffffff;
-        unsigned long split_bound = _split_range & 0xffffffff;
+        long split_vid = _split_start;
+        unsigned long split_bound = _split_end;
         while(split_vid < split_bound){
             if(vid != split_vid){
                 hash_id = HASH_SEED;
@@ -178,8 +178,8 @@ thread vertex_master {
             split_vid = split_vid + 1;
         }
             long *neighbor_ptr = g_v + (vid << 6);
-            neighbor_ptr = neighbor_ptr + 32;
-            send_dram_write(neighbor_ptr, itera, parent, v_neighs_return);
+            neighbor_ptr = neighbor_ptr + 48;
+            send_dram_write(neighbor_ptr, parent, itera, v_neighs_return);
             count = count + 1;
             // lmbuff[hash_id] = vid;
             // lmbuff[hash_id+1] = itera;
@@ -200,7 +200,7 @@ thread vertex_master {
          // check if this is zero degree or split == -1 vertex
 
 
-    event v_orig_return(long _degree, long _orig_vid, long _vid, long* _neighbors, long _distance, long _parent, long _split_range, long _padding) {
+    event v_orig_return(long _degree, long _vid, long* _neighbors, long _orig_vid, long _split_start, long _split_end, long _parent, long _distance) {
         #ifdef DEBUG
         print("[DEBUG][NWID %lu] <v_orig_return> vid:%lu, distance:%lu, itera:%lu, parent:%lu", NETID, _vid, _distance, itera, parent);
         #endif
@@ -211,8 +211,8 @@ thread vertex_master {
             lmbuff[hash_id+1] = _distance;
             /* update vertex structure */
             long *v_ptr = g_v + (vid << 6);
-            v_ptr = v_ptr + 32;
-            send_dram_write(v_ptr, _distance, parent, v_neighs_return);
+            v_ptr = v_ptr + 48;
+            send_dram_write(v_ptr, parent, _distance, v_neighs_return);
             count = count + 1;
             return_value = 1;
             
@@ -231,44 +231,15 @@ thread vertex_master {
             yield;
         }
 
-
-        // /* no split vertex*/
-        // if(_split_range == 0){ 
-        //     unsigned long* local lmbuff = LMBASE + (CACHE_OFFSET << 3);
-        //     // lmbuff[hash_id] = vid;
-        //     // lmbuff[hash_id+1] = itera;
-        //     long *v_ptr = g_v + (_orig_vid << 6);
-        //     v_ptr = v_ptr + 32;
-        //     send_dram_write(v_ptr, itera, parent, v_neighs_return);
-        //     count = count + 1;
-        //     v_ptr = g_v + (vid << 6);
-        //     v_ptr = v_ptr + 32;
-        //     send_dram_write(v_ptr, itera, parent, v_neighs_return);
-        //     count = count + 1;
-        //     return_value = 1;
-        //     long* neighbor_ptr = _neighbors;
-        //     long* neighbor_ptr_end = _neighbors + (_degree << 3);
-        //     while(neighbor_ptr < neighbor_ptr_end)
-        //     {
-        //         send_dram_read(neighbor_ptr, 8, v_neighs);
-        //         neighbor_ptr = neighbor_ptr + 64;
-        //         count = count + 8;
-        //         #ifdef DEBUG
-        //         print("[DEBUG][NWID %lu] <vertex_master> write back vid:%lu. count:%lu", NETID, vid, count);
-        //         #endif
-        //     }
-        //     yield;
-        // }
-
         // lmbuff[hash_id] = vid;
         // lmbuff[hash_id+1] = -1;
         long *v_ptr = g_v + (_orig_vid << 6);
-        v_ptr = v_ptr + 32;
-        send_dram_write(v_ptr, itera, parent, v_neighs_return);
+        v_ptr = v_ptr + 48;
+        send_dram_write(v_ptr, parent, itera, v_neighs_return);
         count = count + 1;
         /* split vertex */
-        long split_vid = (_split_range >> 32) & 0xffffffff;
-        unsigned long  split_bound = _split_range & 0xffffffff;
+        long split_vid = _split_start;
+        unsigned long  split_bound = _split_end;
         while(split_vid < split_bound){
             if(vid != split_vid){
             hash_id = HASH_SEED;
@@ -285,8 +256,8 @@ thread vertex_master {
             split_vid = split_vid + 1;
         }
         v_ptr = g_v + (vid << 6);
-            v_ptr = v_ptr + 32;
-            send_dram_write(v_ptr, itera, parent, v_neighs_return);
+            v_ptr = v_ptr + 48;
+            send_dram_write(v_ptr, parent, itera, v_neighs_return);
             count = count + 1;
             // lmbuff[hash_id] = vid;
             // lmbuff[hash_id+1] = itera;
