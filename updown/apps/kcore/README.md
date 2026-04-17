@@ -48,6 +48,6 @@ cd udweave/compact/
 make
 cd ../
 make
-./kcore ../preprocess/RMAT_s12_kcore.txt_gv.bin ../preprocess/RMAT_s12_kcore.txt_nl.bin 2048 10
+./kcore ../preprocess/RMAT_s12_kcore.txt_gv.bin ../preprocess/RMAT_s12_kcore.txt_nl.bin 2048 100
 ```
 

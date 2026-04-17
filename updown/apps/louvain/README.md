@@ -29,7 +29,7 @@ eg:
 ```
 cd preprocess/
 make
-./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_tc.txt
+./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_lv.txt
 ```
 
 
@@ -44,6 +44,6 @@ eg:
 ```
 cd udweave/
 make
-./louvain 1 ../preprocess/RMAT_s12_tc.txt_gv.bin  ../preprocess/RMAT_s12_tc.txt_nl.bin
+./louvain 1 ../preprocess/RMAT_s12_lv.txt_gv.bin  ../preprocess/RMAT_s12_lv.txt_nl.bin
 ```
 
