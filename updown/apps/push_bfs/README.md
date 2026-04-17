@@ -36,7 +36,7 @@ make
 ### Run KTruss
 ```bash
 cd install/updown/apps/
-./bfs_udweave <graph_file> <num_lanes> <num_control_lanes_per_level> <root_vid>  (<network_latency> <network_bandwidth>)
+./bfs_udweave  <graph_file_gv.bin> <graph_file_nl.bin> <num_lanes> <num_control_lanes_per_level> <root_vid>  (<network_latency> <network_bandwidth>)
 ```
 
 eg: 
