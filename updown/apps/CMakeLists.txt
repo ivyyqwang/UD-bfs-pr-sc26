@@ -13,7 +13,7 @@ if (UPDOWNRT_ENABLE_APPS)
         pagerank_udkvmsr/split_and_shuffle.cpp
         pagerank_udkvmsr/pagerankMSRdramalloc.cpp
         pagerank_udkvmsr/pagerank_data_driven/pagerankPullDD.cpp
-        network_test/sync_bfs/bfs_udweave.cpp
+        push_bfs/udweave/bfs_udweave.cpp
     	)
     if (UPDOWN_ENABLE_FASTSIM)
         list(APPEND UPDOWNSIMRT_APPS_SRC 
@@ -38,7 +38,7 @@ if (UPDOWNRT_ENABLE_APPS)
         KTruss/udweave/k_truss_exe.py
         pagerank_udkvmsr/pagerankMSRdramallocEFA.py
         pagerank_udkvmsr/pagerank_data_driven/out/pagerank_pull_dd.py
-        network_test/sync_bfs/bfs_udweave_exe.py
+        push_bfs/udweave/bfs_udweave_exe.py
     )
 
 
