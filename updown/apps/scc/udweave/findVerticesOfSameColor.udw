@@ -1,0 +1,127 @@
+#include "broadcast.udwh"
+#include "scc.udwh"
+
+// #define DEBUG_FINDVERTICES
+
+extern event backtrack__cache_init();
+extern event backtrack__cache_flush();
+
+thread FindVerticesOfSameColor {
+
+	event start(unsigned long* vertices, unsigned long numVertices, 
+		        unsigned long numLanes) {
+
+
+		#ifdef DEBUG_FINDVERTICES
+			print("Start: %p, numVertices: %lu, numLanes: %lu", vertices, numVertices, numLanes);
+		#endif
+
+		// distribute the work among all lanes available
+		unsigned long evw = evw_new(NETID, BROADCAST__broadcast_global);
+		unsigned long cont = evw_update_event(CEVNT, done);
+		unsigned long evw_broadcast = evw_new(NETID, BroadcastFindVertexWorker::start);
+
+		unsigned long* local spPtr = LMBASE + SEND_BUFFER_OFFSET;
+		spPtr[0] = numLanes;
+		spPtr[1] = evw_broadcast;
+		copyOperands(vertices, spPtr + 2*sizeof(long), 3);
+		
+		// length and destination address in the LM is configured in the Broadcast receiver
+		send_event(evw, spPtr, 8, cont);
+	}
+
+
+	event done() {
+		#ifdef DEBUG_FINDVERTICES
+			print("finished");
+		#endif
+		EXIT;
+    	yield_terminate;
+	}
+}
+
+
+thread BroadcastFindVertexWorker {
+	unsigned long *verticesBase;
+	unsigned long *verticesCurrentPointer;
+	unsigned long *edges;
+	unsigned long numVerticesPerLane;
+	unsigned long counter;
+
+	event start(unsigned long* verticesBase_, unsigned long numVertices_, unsigned long numLanes_) {
+
+		
+		// determine the numVertices that the lane should handle
+		unsigned long laneOffset;
+		unsigned long base = numVertices_ / numLanes_;
+		unsigned long remainder = numVertices_ % numLanes_;
+		if(NETID < remainder) {
+			numVerticesPerLane = base + 1; 
+			laneOffset = NETID;
+		} else {
+			numVerticesPerLane = base;
+			laneOffset = remainder;
+		}
+
+		if(numVerticesPerLane == 0) {
+			send_event(CCONT, IGNRCONT);
+			yield;
+		}
+
+		// set the base addresses
+		unsigned long offsetStartAddress = (NETID * base + laneOffset) * vertex_size;
+		verticesBase = verticesBase_ + offsetStartAddress;
+
+		#ifdef DEBUG_FINDVERTICES
+			print("Start Worker: verticesBase_: %p, numVertices: %lu, numLanes: %lu", verticesBase_, numVertices_, numLanes_);
+			print("\tsrcBase: %p, numVerticesPerLane: %lu, remainder: %lu", verticesBase, numVerticesPerLane, remainder);
+		#endif
+
+		verticesCurrentPointer = verticesBase + 8; // point to where the degree is (loading the ID and the color)
+
+		counter = 0;
+		unsigned long cont = evw_update_event(CEVNT, returnFromRead);
+		for(unsigned long i=0; i<MAX_OUTSTANDING_READ_REQUESTS && numVerticesPerLane>0; i++) {
+			send_dram_read(verticesCurrentPointer, 4, returnFromRead);
+			verticesCurrentPointer = verticesCurrentPointer + vertex_size;
+			numVerticesPerLane--;
+			counter++;
+		}
+	}
+
+	event returnFromRead(unsigned long degree, unsigned long edgesBefore_unused, unsigned long vertexID, unsigned long color, unsigned long* readAddress) {
+
+		if(color != -1 && vertexID == color) {
+			// mark this vertex as visited by setting the color to -1
+			// and the SCC ID to the color;
+			unsigned long* writeAddress = readAddress + 24; // skip over degree, edges_before and vertex_id
+			#ifdef DEBUG_FINDVERTICES
+				print("Found a vertex with the same color: %lu. Mark it as visited. readAddress: %p, writeAddress: %p", vertexID, readAddress, writeAddress);
+			#endif
+			send_dram_write(writeAddress, -1, color, returnFromWrite);
+			counter++;
+		}
+
+		// check for more data to be loaded
+		if(numVerticesPerLane != 0) {
+			send_dram_read(verticesCurrentPointer, 4, CEVNT);
+			verticesCurrentPointer = verticesCurrentPointer + vertex_size;
+			numVerticesPerLane--;
+		} else {
+			counter--;
+			if(counter == 0) {
+				// inform the broadcast library that we are done
+				send_event(CCONT, IGNRCONT);
+			}
+		}
+
+	}
+
+	event returnFromWrite() {
+		counter--;
+		if(counter == 0) {
+			// inform the broadcast library that we are done
+			send_event(CCONT, IGNRCONT);
+		}
+	}
+}

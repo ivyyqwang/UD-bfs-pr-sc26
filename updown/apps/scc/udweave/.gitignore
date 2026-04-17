@@ -1,0 +1,11 @@
+*.py
+preprocess
+scc
+scc.assembly
+scc.o
+scc_cpu
+scc_exe.hpp
+scc_exe.symbol_table
+
+!GenBfsPushPullEFA.py
+!backtrack_modules.py

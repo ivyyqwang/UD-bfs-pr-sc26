@@ -1,0 +1,11 @@
+#ifndef __BROADCAST_UDWH__
+#define __BROADCAST_UDWH__
+
+asm native {"
+  from LinkableGlobalSync import Broadcast
+  Broadcast(state=state0, identifier='BROADCAST', debug_flag=False)
+"};
+
+#endif
+extern event BROADCAST__broadcast_global();
+extern event BroadcastReduction::start();

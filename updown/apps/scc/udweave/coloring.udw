@@ -1,0 +1,1786 @@
+#include "scc.udwh"
+
+#define VERTEX_FIELDS_COLORING 5
+
+thread Coloring_MULTI_main {
+  unsigned long child_event;
+
+  event start(unsigned long N, unsigned long M, unsigned long *graph_, unsigned long *target_graph_,
+              unsigned long num_lanes) {
+    print("start Coloring_MULTI: start iter, N = %lu, M = %lu", N, M);
+    unsigned long *local args = args_scratch_space;
+    copyOperands(N, args, 4);
+    args[4] = 0; // min_label
+    args[5] = 0; // edges_to_left_of_start
+    args[6] = FAKE_SPREAD_LANES(num_lanes);
+    args[7] = 0; // lane_start
+    args[8] = 0;
+    
+    unsigned long evwWord;
+    if (num_lanes > SWITCH_TO_SPLIT_2) {
+      print("using split_vertexsColoring_MULTI");
+      evwWord = evw_new(0, split_vertexsColoring_MULTI::start);
+    } else {
+      print("using split_vertexs2Coloring_MULTI");
+      evwWord = evw_new(0, split_vertexs2Coloring_MULTI::start);
+    }
+    unsigned long continuationWord = evw_update_event(CEVNT, done);
+    send_event(evwWord, args, 9, continuationWord);
+  }
+
+  event done(unsigned long num_vertices_visited, unsigned long num_vertices_updated, unsigned long child) {
+    print("end Coloring_MULTI: done iter, num_vertices_updated = %lu, num_vertices_visited = %lu, child = %lx", 
+          num_vertices_updated, num_vertices_visited, child);
+    unsigned long *local args = args_scratch_space;
+    args[0] = num_vertices_updated;
+    args[1] = num_vertices_visited;
+    args[2] = TID;
+    child_event = child;
+    EXIT;
+  }
+
+  event run_iter(long stop_if_neg_1) {
+    if (stop_if_neg_1 == -1) {
+      print("stopping");
+      if (child_event) {
+        send_event(child_event, stop_if_neg_1, IGNRCONT);
+      }
+      EXIT;
+      yield_terminate;
+    }
+    print("start Coloring_MULTI: run iter, child_event = %lx", child_event);
+    unsigned long continuationWord = evw_update_event(CEVNT, done);
+    if (child_event) {
+      send_event(child_event, stop_if_neg_1, continuationWord);
+    } else {
+      print("empty case: done iter");
+      unsigned long *local args = args_scratch_space;
+      args[0] = 0;
+      args[1] = 0;
+      args[2] = TID;
+      EXIT;
+    }
+  }
+}
+
+thread split_vertexsColoring_MULTI {
+
+  unsigned long N;
+  unsigned long counter;
+
+  long M;
+  unsigned long num_lanes;
+  unsigned long lane_start;
+
+  unsigned long *vertexs;
+  unsigned long *graph;
+  unsigned long edges_to_left_of_start;
+  unsigned long depth;
+
+  unsigned long num_vertices_updated;
+  unsigned long num_vertices_visited;
+
+  // M is the number of edges in my region
+  event start(unsigned long N_, long M_, unsigned long *vertexs_,
+              unsigned long *graph_, unsigned long unused,
+              unsigned long edges_to_left_of_start_, unsigned long num_lanes_,
+              unsigned long lane_start_, unsigned long depth_) {
+
+    if (N_ == 0 || M_ == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+
+    if (num_lanes_ <= 1) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_vertexs_on_one_lane_Coloring_MULTI::start);
+      send_ops(evwWord, N_, 5, CCONT);
+      yield;
+    }
+
+    depth = depth_ + 1;
+    num_lanes = num_lanes_;
+    lane_start = lane_start_;
+    graph = graph_;
+
+    if (N_ == 1) {
+      send_dram_read(vertexs_, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_single);
+      yield;
+    }
+    M = M_;
+
+    N = N_;
+
+    unsigned long *local ptr;
+    local_child_data_ptr(ptr);
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    vertexs = vertexs_;
+
+    if (N <= 8) {
+      send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom0);
+      vertexs = vertexs + vertex_size;
+      send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom1);
+      if (N > 2) {
+        vertexs = vertexs + vertex_size;
+        send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom2);
+        if (N > 3) {
+          vertexs = vertexs + vertex_size;
+          send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom3);
+          if (N > 4) {
+            vertexs = vertexs + vertex_size;
+            send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom4);
+            if (N > 5) {
+              vertexs = vertexs + vertex_size;
+              send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom5);
+              if (N > 6) {
+                vertexs = vertexs + vertex_size;
+                send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom6);
+                if (N > 7) {
+                  vertexs = vertexs + vertex_size;
+                  send_dram_read(vertexs, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_bottom7);
+                } else {
+                  ref_child_event(ptr, 7) = 0;
+                }
+              } else {
+                ref_child_event(ptr, 6) = 0;
+                ref_child_event(ptr, 7) = 0;
+              }
+            } else {
+              ref_child_event(ptr, 5) = 0;
+              ref_child_event(ptr, 6) = 0;
+              ref_child_event(ptr, 7) = 0;
+            }
+          } else {
+            ref_child_event(ptr, 4) = 0;
+            ref_child_event(ptr, 5) = 0;
+            ref_child_event(ptr, 6) = 0;
+            ref_child_event(ptr, 7) = 0;
+          }
+        } else {
+          ref_child_event(ptr, 3) = 0;
+          ref_child_event(ptr, 4) = 0;
+          ref_child_event(ptr, 5) = 0;
+          ref_child_event(ptr, 6) = 0;
+          ref_child_event(ptr, 7) = 0;
+        }
+      } else {
+        ref_child_event(ptr, 2) = 0;
+        ref_child_event(ptr, 3) = 0;
+        ref_child_event(ptr, 4) = 0;
+        ref_child_event(ptr, 5) = 0;
+        ref_child_event(ptr, 6) = 0;
+        ref_child_event(ptr, 7) = 0;
+      }
+      counter = N - 1;
+      yield;
+    }
+    edges_to_left_of_start = edges_to_left_of_start_;
+
+    unsigned long shift = (N_ >> 3);
+    shift = shift * vertex_size;
+    unsigned long *v = vertexs + shift + 16; // just load the edges before field
+    send_dram_read(v, 1, after_load_vertex_offsets_0);
+    v = v + shift;
+    send_dram_read(v, 1, after_load_vertex_offsets_1);
+    v = v + shift;
+    send_dram_read(v, 1, after_load_vertex_offsets_2);
+    v = v + shift;
+    send_dram_read(v, 1, after_load_vertex_offsets_3);
+    v = v + shift;
+    send_dram_read(v, 1, after_load_vertex_offsets_4);
+    v = v + shift;
+    send_dram_read(v, 1, after_load_vertex_offsets_5);
+    v = v + shift;
+    send_dram_read(v, 1, after_load_vertex_offsets_6);
+    counter = 6;
+  }
+
+  event after_load_vertex_offsets_single(
+      unsigned long *edges, unsigned long degree,
+      unsigned long edges_before_vertex, unsigned long vertex_id_loaded,
+      unsigned long color) {
+
+    if (degree == 0 || color == -1) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+
+    // if we are down to a single vertex, just run it
+    unsigned long *local args = args_scratch_space;
+    args[0] = edges;
+    args[1] = degree;
+    args[2] = vertex_id_loaded;
+    args[3] = graph;
+    args[4] = color;
+    args[5] = 0; // unused
+    args[6] = num_lanes;
+    args[7] = lane_start;
+    args[8] = depth;
+    // reuse register
+    unsigned long evwWord;
+    if (1) {
+      int id = FAKE_COMBINE_LANES(lane_start);
+      evwWord = evw_new(id, process_vertex_Coloring_MULTI::start);
+    }
+    send_event(evwWord, args, 9, CCONT);
+    yield_terminate;
+  }
+
+#define after_load_vertex_offsets_bottom_event(num)                            \
+  event after_load_vertex_offsets_bottom##num(                                 \
+      unsigned long *edges, unsigned long degree,                              \
+      unsigned long edges_before_vertex, unsigned long vertex_id,              \
+      unsigned long color) {                                                   \
+    if (degree == 0 || color == -1) {                                          \
+      counter = counter - 1;                                                   \
+      M = M - degree;                                                          \
+      set_child_event(0, num);                                                 \
+      yield;                                                                   \
+    }                                                                          \
+                                                                               \
+    unsigned long *local args = args_scratch_space;                            \
+    unsigned long lanes_for_worker = num_lanes * degree;                       \
+    lanes_for_worker = lanes_for_worker / M;                                   \
+    args[0] = edges;                                                           \
+    args[1] = degree;                                                          \
+    args[2] = vertex_id;                                                       \
+    args[3] = graph;                                                           \
+    args[4] = color;                                                           \
+    args[5] = 0;   /* unused */                                                \
+    args[6] = lanes_for_worker;                                                \
+    args[7] = lane_start;                                                      \
+    args[8] = depth;                                                           \
+    if (1) {                                                                   \
+      unsigned long evwWord;                                                   \
+      if (1) {                                                                 \
+        int id = FAKE_COMBINE_LANES(lane_start);                               \
+        evwWord = evw_new(id, process_vertex_Coloring_MULTI::start);           \
+      }                                                                        \
+      send_event(evwWord, args, 9, evw_update_event(CEVNT, done_##num));       \
+    }                                                                          \
+    lane_start = lane_start + lanes_for_worker;                                \
+    num_lanes = num_lanes - lanes_for_worker;                                  \
+    M = M - degree;                                                            \
+  }
+
+  // clang-format off
+  after_load_vertex_offsets_bottom_event(0)
+  after_load_vertex_offsets_bottom_event(1)
+  after_load_vertex_offsets_bottom_event(2)
+  after_load_vertex_offsets_bottom_event(3)
+  after_load_vertex_offsets_bottom_event(4)
+  after_load_vertex_offsets_bottom_event(5)
+  after_load_vertex_offsets_bottom_event(6)
+  after_load_vertex_offsets_bottom_event(7)
+  // clang-format on
+
+  event
+  ignore() {}
+
+#define after_load_vertex_offsets_event_process_not_last_child(num)            \
+  if (1) {                                                                     \
+    long num_edges;                                                            \
+    get_child_event(num_edges, num);                                           \
+    num_edges = num_edges - edges_to_left_of_start;                            \
+    ASSERT_UDW_NON_NEGATIVE(num_edges);                                        \
+    unsigned long lanes_for_child =                                            \
+        (VERTEX_WORK_FACTOR * N_shifted) + num_edges;                          \
+    if (1) {                                                                   \
+      lanes_for_child = (num_lanes * lanes_for_child);                         \
+      lanes_for_child = lanes_for_child / counter;                             \
+      if (lanes_for_child == 0) {                                              \
+        lanes_for_child = (VERTEX_WORK_FACTOR * N_shifted) + num_edges;        \
+        lanes_for_child = 4 * lanes_for_child;                                 \
+        lanes_for_child = (num_lanes * lanes_for_child);                       \
+        lanes_for_child = lanes_for_child / counter;                           \
+        if (lanes_for_child) {                                                 \
+          lanes_for_child = 1;                                                 \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+    if (1) {                                                                   \
+      if (1) {                                                                 \
+        args[1] = num_edges;                                                   \
+        args[2] = vertexs;                                                     \
+        args[5] = edges_to_left_of_start;                                      \
+        args[6] = lanes_for_child;                                             \
+        args[7] = lane_start;                                                  \
+      }                                                                        \
+      int id = FAKE_COMBINE_LANES(lane_start);                                 \
+      if (depth < FORCE_FIRST_NODE) {                                          \
+        id = id % 2048;                                                        \
+      }                                                                        \
+      counter = FAKE_SPREAD_LANES(SWITCH_TO_SPLIT_2);                          \
+      if (lanes_for_child > counter) {                                         \
+        counter = evw_new(id, start);                                          \
+      } else {                                                                 \
+        counter = evw_new(id, split_vertexs2Coloring_MULTI::start);             \
+      }                                                                        \
+      send_event(counter, args, 9, evw_update_event(CEVNT, done_##num));       \
+    }                                                                          \
+    edges_to_left_of_start = edges_to_left_of_start + num_edges;               \
+    lane_start = lane_start + lanes_for_child;                                 \
+    vertexs = vertexs + (N_shifted * vertex_size);                             \
+    M = M - num_edges;                                                         \
+    N = N - N_shifted;                                                         \
+    ASSERT_UDW_NON_ZERO(M);                                                    \
+    ASSERT_UDW_NON_ZERO(N);                                                    \
+    num_lanes = num_lanes - lanes_for_child;                                   \
+    counter = (VERTEX_WORK_FACTOR * N) + M;                                    \
+  }
+
+#define after_load_vertex_offsets_event(num)                                   \
+  event after_load_vertex_offsets_##num(unsigned long edges_before_vertex) {   \
+    set_child_event(edges_before_vertex, num);                                 \
+    if (counter == 0) {                                                        \
+      /*TODO(wheatman) right now uneven splits give all extra lanes and        \
+       * vertices to the last one, do something better */                      \
+      counter = (VERTEX_WORK_FACTOR * N) + M;                                  \
+      unsigned long *local args = args_scratch_space;                          \
+      unsigned long N_shifted = N >> 3;                                        \
+      args[0] = N_shifted;                                                     \
+      args[3] = graph;                                                         \
+      args[4] = 0;                                                             \
+      args[8] = depth;                                                         \
+      if (1) {                                                                 \
+        after_load_vertex_offsets_event_process_not_last_child(0);             \
+        after_load_vertex_offsets_event_process_not_last_child(1);             \
+        after_load_vertex_offsets_event_process_not_last_child(2);             \
+        after_load_vertex_offsets_event_process_not_last_child(3);             \
+        after_load_vertex_offsets_event_process_not_last_child(4);             \
+        after_load_vertex_offsets_event_process_not_last_child(5);             \
+        after_load_vertex_offsets_event_process_not_last_child(6);             \
+      }                                                                        \
+      if (1) { /* child 8*/                                                    \
+        if (1) {                                                               \
+          if (1) {                                                             \
+            args[0] = N;                                                       \
+            args[1] = M;                                                       \
+            args[2] = vertexs;                                                 \
+            args[5] = edges_to_left_of_start;                                  \
+            ASSERT_UDW_NON_NEGATIVE(num_lanes);                                \
+            ASSERT_UDW_NON_ZERO(num_lanes);                                    \
+            ASSERT_UDW_NON_ZERO(M);                                            \
+            args[6] = num_lanes;                                               \
+            args[7] = lane_start;                                              \
+          }                                                                    \
+          int id = FAKE_COMBINE_LANES(lane_start);                             \
+          if (depth < FORCE_FIRST_NODE) {                                      \
+            id = id % 2048;                                                    \
+          }                                                                    \
+          counter = FAKE_SPREAD_LANES(SWITCH_TO_SPLIT_2);                      \
+          if (num_lanes > counter) {                                           \
+            counter = evw_new(id, start);                                      \
+          } else {                                                             \
+            counter = evw_new(id, split_vertexs2Coloring_MULTI::start);         \
+          }                                                                    \
+          send_event(counter, args, 9, evw_update_event(CEVNT, done_7));       \
+        }                                                                      \
+      }                                                                        \
+      counter = 7;                                                             \
+      yield;                                                                   \
+    }                                                                          \
+    counter = counter - 1;                                                     \
+  }
+
+  // clang-format off
+  after_load_vertex_offsets_event(0)
+  after_load_vertex_offsets_event(1)
+  after_load_vertex_offsets_event(2)
+  after_load_vertex_offsets_event(3)
+  after_load_vertex_offsets_event(4)
+  after_load_vertex_offsets_event(5)
+  after_load_vertex_offsets_event(6)
+  // clang-format on
+
+  event
+  ignore4() {}
+
+#define done_event(num)                                                        \
+  event done_##num(unsigned long unused, unsigned long num_vertices_updated_,  \
+                   unsigned long new_child) {                                  \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    ref_child_event(child_data, num) = new_child;                              \
+    unsigned long visited = num_vertices_updated_ >> 32;  \
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32; \
+    num_vertices_updated = num_vertices_updated + updated;       \
+    num_vertices_visited = num_vertices_visited + visited;\
+    if (counter == 0) {                                                        \
+      num_vertices_visited = num_vertices_visited << 32;  \
+      num_vertices_updated = num_vertices_visited | num_vertices_updated; \
+      send_event(CCONT, 0, num_vertices_updated,                  \
+                 evw_update_event(CEVNT, run_iter), IGNRCONT);                 \
+      counter = -1;                                                            \
+      num_vertices_updated = 0;                                                \
+      num_vertices_visited = 0; \
+      yield;                                                                   \
+    }                                                                          \
+    counter = counter - 1;                                                     \
+  }
+
+  // clang-format off
+  done_event(0) 
+  done_event(1) 
+  done_event(2)
+  done_event(3) 
+  done_event(4) 
+  done_event(5)
+  done_event(6)
+  done_event(7)
+  // clang-format on
+
+  event
+  ignore5() {}
+
+  event run_iter(long stop_if_neg_1) {
+    unsigned long *local child_data;
+    local_child_data_ptr(child_data);
+    counter = 0;
+    if (ref_child_event(child_data, 0) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 0), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_0));
+    }
+    if (ref_child_event(child_data, 1) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 1), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_1));
+    }
+    if (ref_child_event(child_data, 2) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 2), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_2));
+    }
+    if (ref_child_event(child_data, 3) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 3), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_3));
+    }
+    if (ref_child_event(child_data, 4) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 4), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_4));
+    }
+    if (ref_child_event(child_data, 5) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 5), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_5));
+    }
+    if (ref_child_event(child_data, 6) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 6), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_6));
+    }
+    if (ref_child_event(child_data, 7) != 0) {
+      counter = counter + 1;
+      send_event(ref_child_event(child_data, 7), stop_if_neg_1,
+                 evw_update_event(CEVNT, done_7));
+    }
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    if (counter == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+    counter = counter - 1;
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+    yield;
+  }
+}
+
+thread split_vertexs2Coloring_MULTI {
+
+  unsigned long N;
+  long M;
+  unsigned long counter;
+
+  unsigned long num_lanes_or_left_child;
+  unsigned long lane_start_or_right_child;
+
+  unsigned long *vertexs;
+  unsigned long *graph;
+  unsigned long edges_to_left_of_start;
+  unsigned long depth;
+
+  unsigned long num_vertices_updated;
+  unsigned long num_vertices_visited;
+
+  // M is the number of edges in my region
+
+  event start(unsigned long N_, long M_, unsigned long *vertexs_,
+              unsigned long *graph_, unsigned long unused,
+              unsigned long edges_to_left_of_start_, unsigned long num_lanes_,
+              unsigned long lane_start_, unsigned long depth_) {
+
+    ASSERT_UDW_NON_NEGATIVE(M_);
+
+    if (N_ == 0 || M_ == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+
+    if (num_lanes_ <= 1) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_vertexs_on_one_lane_Coloring_MULTI::start);
+      send_ops(evwWord, N_, 5, CCONT);
+      yield;
+    }
+    depth = depth_ + 1;
+    num_lanes_or_left_child = num_lanes_;
+    lane_start_or_right_child = lane_start_;
+    graph = graph_;
+
+    if (N_ == 1) {
+      send_dram_read(vertexs_, VERTEX_FIELDS_COLORING, after_load_vertex_offsets_single);
+      yield;
+    }
+
+    M = M_;
+    N = N_;
+    vertexs = vertexs_;
+    edges_to_left_of_start = edges_to_left_of_start_;
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    unsigned long shift = (N_ >> 1);
+    shift = shift * vertex_size;
+    unsigned long *v = vertexs + shift;
+    send_dram_read(v, VERTEX_FIELDS_COLORING, after_load_vertex_offsets);
+    counter = 1;
+  }
+
+  event after_load_vertex_offsets_single(
+      unsigned long *edges, unsigned long degree,
+      unsigned long edges_before_vertex, unsigned long vertex_id,
+      unsigned long color) {
+    if (degree == 0 || color == -1) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+    // if we are down to a single vertex, just run it
+    unsigned long *local args = args_scratch_space;
+    args[0] = edges;
+    args[1] = degree;
+    args[2] = vertex_id;
+    args[3] = graph;
+    args[4] = color;
+    args[5] = 0; // unused
+    args[6] = num_lanes_or_left_child;
+    args[7] = lane_start_or_right_child;
+    args[8] = depth;
+  
+    unsigned long evwWord;
+    evwWord = evw_update_event(CEVNT, process_vertex_Coloring_MULTI::start);
+    send_event(evwWord, args, 9, CCONT);
+    yield;
+  }
+
+  
+  event after_load_vertex_offsets(unsigned long *edges_, unsigned long degree_,
+                                  unsigned long edges_before_vertex,
+                                  unsigned long vertex_id_, unsigned long color_) {
+    // split the work and recurse
+
+    // reuse left_child register
+    unsigned long edges_for_left_half = 0;
+    unsigned long lanes_for_left_half = 0;
+    
+    // reuse register
+    counter = (N >> 1);
+    if (1) {
+      edges_for_left_half = edges_before_vertex - edges_to_left_of_start;
+      lanes_for_left_half = edges_for_left_half;
+      lanes_for_left_half =
+          lanes_for_left_half + (VERTEX_WORK_FACTOR * counter);
+      lanes_for_left_half = lanes_for_left_half * num_lanes_or_left_child;
+      unsigned long spare = (VERTEX_WORK_FACTOR * N);
+      spare = spare + M;
+      lanes_for_left_half = lanes_for_left_half / spare;
+    }
+
+    if (lanes_for_left_half == 0) {
+      // reusing the lanes_for_left_half register
+      lanes_for_left_half = VERTEX_WORK_FACTOR * counter;
+      lanes_for_left_half = lanes_for_left_half + edges_for_left_half;
+      // if we are more than half way to needing 1 lane, give it the lane
+      lanes_for_left_half = lanes_for_left_half * num_lanes_or_left_child;
+      lanes_for_left_half = lanes_for_left_half * 2;
+      unsigned long spare = (VERTEX_WORK_FACTOR * N);
+      spare = spare + M;
+      lanes_for_left_half = lanes_for_left_half / spare;
+      if (lanes_for_left_half) {
+        lanes_for_left_half = 1;
+      }
+    }
+    ASSERT_UDW_NON_NEGATIVE(edges_for_left_half);
+    
+    unsigned long *local args = args_scratch_space;
+    
+    
+    if (1) {
+      if (1) {
+        args[0] = counter;
+        args[1] = edges_for_left_half;
+        args[2] = vertexs;
+        args[3] = graph;
+        //args[4] = color_; // unused
+        args[5] = edges_to_left_of_start;
+        args[6] = lanes_for_left_half;
+        args[7] = lane_start_or_right_child;
+        args[8] = depth;
+      }
+      if (lanes_for_left_half > 1) {
+        int id = FAKE_COMBINE_LANES(lane_start_or_right_child);
+        unsigned long envword = evw_new(id, start);
+        send_event(envword, args, 9, evw_update_event(CEVNT, done_left));
+      } else { /* lanes_for_left_half == 1*/
+        int id = FAKE_COMBINE_LANES(lane_start_or_right_child);
+        unsigned long envword =
+            evw_new(id, process_vertexs_on_one_lane_Coloring_MULTI::start);
+        send_event(envword, args, 5, evw_update_event(CEVNT, done_left));
+      }
+    }
+    if (1) {
+      // reuse registers
+      if (1) {
+        args[0] = N - counter;
+        args[1] = M - edges_for_left_half;
+        ASSERT_UDW_NON_NEGATIVE(M - edges_for_left_half);
+      }
+      if (1) {
+        args[2] = vertexs + (counter * vertex_size);
+        args[5] = edges_before_vertex;
+      }
+
+      if (1) {
+        args[6] = num_lanes_or_left_child - lanes_for_left_half;
+        args[7] = lane_start_or_right_child + lanes_for_left_half;
+      }
+      int local_lane_start = FAKE_COMBINE_LANES(args[7]);
+      if (depth < FORCE_FIRST_NODE) {
+        local_lane_start = local_lane_start % 2048;
+      }
+
+      if ((num_lanes_or_left_child - lanes_for_left_half) > 1) {
+        // reuse registers
+        unsigned long envword = evw_new(local_lane_start, start);
+        send_event(envword, args, 9, evw_update_event(CEVNT, done_right));
+      } else { /* lanes_for_right_half == 1*/
+        if (args[0] > 1) {
+          unsigned long envword =
+              evw_new(local_lane_start,
+                      process_vertexs_on_one_lane_Coloring_MULTI::start);
+          send_event(envword, args, 5, evw_update_event(CEVNT, done_right));
+        } else {
+          // save a register by duplicating code
+          if (degree_ == 0) {
+            counter = 0;
+            N = 0;
+            M = 0;
+            lane_start_or_right_child = 0;
+            yield;
+          }
+          args[0] = edges_;
+          args[1] = degree_;
+          args[2] = vertex_id_;
+          args[3] = graph;
+          args[4] = color_;
+          //args[5] = 0; // unused
+          unsigned long envword =
+              evw_new(local_lane_start,
+                      process_vertex_on_one_lane_Coloring_MULTI::start);
+          send_event(envword, args, 5, evw_update_event(CEVNT, done_right));
+        }
+      }
+    }
+    counter = 1;
+  }
+
+  event done_left(unsigned long unused, unsigned long num_vertices_updated_,
+                  unsigned long new_child) {
+    ASSERT_UDW_NON_NEGATIVE(counter);
+    unsigned long visited = num_vertices_updated_ >> 32;
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32;
+    num_vertices_updated = num_vertices_updated + updated;
+    num_vertices_visited = num_vertices_visited + visited;
+
+    if (counter == 0) {
+      if (new_child == 0 && lane_start_or_right_child == 0) {
+        num_vertices_visited = num_vertices_visited << 32;
+        num_vertices_updated = num_vertices_visited | num_vertices_updated;
+        send_event(CCONT, 0, num_vertices_updated, 0, IGNRCONT);
+        yield_terminate;
+      }
+      if (new_child == 0) {
+        num_vertices_visited = num_vertices_visited << 32;
+        num_vertices_updated = num_vertices_visited | num_vertices_updated;
+        send_event(CCONT, 0, num_vertices_updated, lane_start_or_right_child,
+                   IGNRCONT);
+        yield_terminate;
+      }
+      if (lane_start_or_right_child == 0) {
+        num_vertices_visited = num_vertices_visited << 32;
+        num_vertices_updated = num_vertices_visited | num_vertices_updated;
+        send_event(CCONT, 0, num_vertices_updated, new_child, IGNRCONT);
+        yield_terminate;
+      }
+      num_vertices_visited = num_vertices_visited << 32;
+      num_vertices_updated = num_vertices_visited | num_vertices_updated;
+      send_event(CCONT, 0, num_vertices_updated,
+                 evw_update_event(CEVNT, run_iter), IGNRCONT);
+      num_lanes_or_left_child = new_child;
+      counter = -1;
+      num_vertices_updated = 0;
+      num_vertices_visited = 0;
+      yield;
+    }
+    num_lanes_or_left_child = new_child;
+    counter = 0;
+  }
+
+  event done_right(unsigned long unused, unsigned long num_vertices_updated_,
+                   unsigned long new_child) {
+    ASSERT_UDW_NON_NEGATIVE(counter);
+
+    unsigned long visited = num_vertices_updated_ >> 32;
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32;
+    num_vertices_updated = num_vertices_updated + updated;
+    num_vertices_visited = num_vertices_visited + visited;
+
+    if (counter == 0) {  
+      if (new_child == 0 && num_lanes_or_left_child == 0) {
+        num_vertices_visited = num_vertices_visited << 32;
+        num_vertices_updated = num_vertices_visited | num_vertices_updated;
+        send_event(CCONT, 0, num_vertices_updated, 0, IGNRCONT);
+        yield_terminate;
+      }
+      if (new_child == 0) {
+        num_vertices_visited = num_vertices_visited << 32;
+        num_vertices_updated = num_vertices_visited | num_vertices_updated;
+        send_event(CCONT, 0, num_vertices_updated, num_lanes_or_left_child,
+                   IGNRCONT);
+        yield_terminate;
+      }
+      if (num_lanes_or_left_child == 0) {
+        num_vertices_visited = num_vertices_visited << 32;
+        num_vertices_updated = num_vertices_visited | num_vertices_updated;
+        send_event(CCONT, 0, num_vertices_updated, new_child, IGNRCONT);
+        yield_terminate;
+      }
+      num_vertices_visited = num_vertices_visited << 32;
+      num_vertices_updated = num_vertices_visited | num_vertices_updated;
+      send_event(CCONT, 0, num_vertices_updated,
+                 evw_update_event(CEVNT, run_iter), IGNRCONT);
+      lane_start_or_right_child = new_child;
+      counter = -1;
+      num_vertices_updated = 0;
+      num_vertices_visited = 0;
+      yield;
+    }
+    lane_start_or_right_child = new_child;
+    counter = 0;
+  }
+
+  event run_iter(long stop_if_neg_1) {
+
+    ASSERT_UDW_NON_ZERO(num_lanes_or_left_child);
+    ASSERT_UDW_NON_ZERO(lane_start_or_right_child);
+    send_event(num_lanes_or_left_child, stop_if_neg_1,
+               evw_update_event(CEVNT, done_left));
+    send_event(lane_start_or_right_child, stop_if_neg_1,
+               evw_update_event(CEVNT, done_right));
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    counter = 1;
+    yield;
+  }
+}
+
+#define ref_child_edges(ptr, num) ptr[0 + (num * 5)]
+#define ref_child_edgesend(ptr, num) ptr[1 + (num * 5)]
+#define ref_child_vertex_id(ptr, num) ptr[2 + (num * 5)]
+#define ref_child_numleft(ptr, num) ptr[3 + (num * 5)]
+#define ref_child_color(ptr, num) ptr[4 + (num * 5)]
+
+thread process_vertexs_on_one_lane_Coloring_MULTI {
+
+  unsigned long *start_vertexs;
+  unsigned long *vertexs;
+  unsigned long *end_vertexs;
+  unsigned long *finished_vertexs;
+
+  unsigned long num_vertices_updated;
+  unsigned long num_vertices_visited;
+
+  unsigned long *graph;
+
+  long remaining_nodes;
+
+  event start(unsigned long N_, unsigned long M_unused, unsigned long *vertexs_,
+              unsigned long *graph_) {
+    graph = graph_;
+
+    if (N_ == 1) {
+      unsigned long continuationWord =
+          evw_update_event(CEVNT, one_offset_loaded);
+      send_dram_read(vertexs_, VERTEX_FIELDS_COLORING, continuationWord);
+      yield;
+    }
+    start_vertexs = vertexs_;
+    vertexs = vertexs_;
+    finished_vertexs = vertexs;
+    end_vertexs = vertexs + (N_ * vertex_size);
+
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+    remaining_nodes = N_;
+
+    unsigned long continuationWord = evw_update_event(CEVNT, offsets_loaded_0);
+    send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+
+    vertexs = vertexs + (vertex_size);
+    if (vertexs < end_vertexs) {
+      continuationWord = evw_update_event(CEVNT, offsets_loaded_1);
+      send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+      vertexs = vertexs + (vertex_size);
+      if (vertexs < end_vertexs) {
+        continuationWord = evw_update_event(CEVNT, offsets_loaded_2);
+        send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+        vertexs = vertexs + (vertex_size);
+        if (vertexs < end_vertexs) {
+          continuationWord = evw_update_event(CEVNT, offsets_loaded_3);
+          send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+          vertexs = vertexs + (vertex_size);
+          if (vertexs < end_vertexs) {
+            continuationWord = evw_update_event(CEVNT, offsets_loaded_4);
+            send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+            vertexs = vertexs + (vertex_size);
+          }
+        }
+      }
+    }
+  }
+
+  event one_offset_loaded(unsigned long *edges0, unsigned long degree0,
+                          unsigned long edges_before0, unsigned long vertex_id0,
+                          unsigned long color) {
+    if (degree0 == 0) {
+      send_event(CCONT, 0, 0, 0, IGNRCONT);
+      yield_terminate;
+    }
+    ASSERT_UDW_NON_ZERO(degree0);
+    unsigned long *local args = args_scratch_space;
+    args[0] = edges0;
+    args[1] = degree0;
+    args[2] = vertex_id0;
+    args[3] = graph;
+    args[4] = color;
+    //args[5] = 0; // unused
+    unsigned long envword = evw_update_event(
+        CEVNT, process_vertex_on_one_lane_Coloring_MULTI::start);
+    send_event(envword, args, 5, CCONT);
+    yield;
+  }
+
+#define offsets_loaded_event(num)                                              \
+  event offsets_loaded_##num(unsigned long *edges0, unsigned long degree0,     \
+                             unsigned long edges_before0,                      \
+                             unsigned long vertex_id0, unsigned long color) {  \
+    if (degree0 == 0) {                                                        \
+      remaining_nodes = remaining_nodes - 1;                                   \
+      finished_vertexs = finished_vertexs + vertex_size;                       \
+      if (finished_vertexs == end_vertexs) {                                   \
+        num_vertices_visited = num_vertices_visited << 32; \
+        num_vertices_updated = num_vertices_visited | num_vertices_updated; \
+        if (remaining_nodes == 0) {                                            \
+          send_event(CCONT, 0, num_vertices_updated, 0, IGNRCONT);                    \
+          yield_terminate;                                                     \
+        }                                                                      \
+        send_event(CCONT, 0, num_vertices_updated,          \
+                   evw_update_event(CEVNT, run_iter), IGNRCONT);               \
+        num_vertices_updated = 0;                                              \
+        num_vertices_visited = 0;                                              \
+        yield;                                                                 \
+      }                                                                        \
+      if (vertexs < end_vertexs) {                                             \
+        unsigned long continuationWord =                                       \
+            evw_update_event(CEVNT, offsets_loaded_##num);                     \
+        send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);              \
+        vertexs = vertexs + (vertex_size);                                     \
+      }                                                                        \
+      yield;                                                                   \
+    }                                                                          \
+    ASSERT_UDW_NON_ZERO(degree0);                                              \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    unsigned long *edges = edges0;                                             \
+    if (1) {                                                                   \
+      int iters = degree0 / 8;                                                 \
+      if (iters * 8 < degree0) {                                               \
+        iters = iters + 1;                                                     \
+      }                                                                        \
+      if (iters > MAX_OUTSTANDING_READ_REQUESTS) {                             \
+        iters = MAX_OUTSTANDING_READ_REQUESTS;                                 \
+      }                                                                        \
+      while (iters > 0) {                                                      \
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources_##num));  \
+        /* +64 is 8 words each 8 bytes in size*/                               \
+        edges = edges + 64;                                                    \
+        iters = iters - 1;                                                     \
+      }                                                                        \
+      ref_child_edges(child_data, num) = edges;                                \
+    }                                                                          \
+    ref_child_edgesend(child_data, num) = edges0 + (degree0 * sizeof(long));   \
+    ref_child_vertex_id(child_data, num) = vertex_id0;                         \
+    ref_child_numleft(child_data, num) = degree0;                              \
+    ref_child_color(child_data, num) = color;                                  \
+  }
+  // clang-format off
+    offsets_loaded_event(0)
+    offsets_loaded_event(1)
+    offsets_loaded_event(2)
+    offsets_loaded_event(3)
+    offsets_loaded_event(4)
+  // clang-format on
+
+#define got_sources_event(num)                                                 \
+  event got_sources_##num(                                                     \
+      unsigned long data0, unsigned long data1, unsigned long data2,           \
+      unsigned long data3, unsigned long data4, unsigned long data5,           \
+      unsigned long data6, unsigned long data7, unsigned long *loc) {          \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    unsigned long remaining_words_or_cont =                                    \
+        (ref_child_edgesend(child_data, num) - loc);                           \
+    remaining_words_or_cont = remaining_words_or_cont / sizeof(long);          \
+    if (remaining_words_or_cont > 8) {                                         \
+      remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);       \
+      array_load8(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);       \
+      unsigned long *edges = ref_child_edges(child_data, num);                 \
+      if (edges < ref_child_edgesend(child_data, num)) {                       \
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources_##num));  \
+        /* +64 is 8 words each 8 bytes in size*/                               \
+        edges = edges + 64;                                                    \
+        ref_child_edges(child_data, num) = edges;                              \
+      }                                                                        \
+      yield;                                                                   \
+    }                                                                          \
+    if (remaining_words_or_cont >= 5) {                                        \
+      if (remaining_words_or_cont >= 7) {                                      \
+        if (remaining_words_or_cont == 8) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load8(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else {                                                               \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load7(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      } else { /* cases for 5 or 6 */                                          \
+        if (remaining_words_or_cont == 6) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load6(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else { /* remaining_words == 5 */                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load5(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      }                                                                        \
+    } else {                                                                   \
+      if (remaining_words_or_cont >= 3) {                                      \
+        if (remaining_words_or_cont == 4) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load4(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else { /* remaining_words == 3*/                                     \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load3(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      } else { /* cases for 1 or 0*/                                           \
+        if (remaining_words_or_cont == 2) {                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load2(graph, data, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        } else { /* remaining_words == 1 */                                    \
+          remaining_words_or_cont = evw_update_event(CEVNT, got_curr_##num);   \
+          array_load(graph, data0, vertex_size, VERTEX_FIELDS_COLORING, remaining_words_or_cont);   \
+          yield;                                                               \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+  }
+
+  // clang-format off
+    got_sources_event(0)
+    got_sources_event(1)
+    got_sources_event(2) 
+    got_sources_event(3)
+    got_sources_event(4)
+
+  // clang-format on
+  event ignore2() {  }
+
+// TODO(wheatman) we don't actually need all this data but its simpler for
+// now
+#define got_curr_event(num)                                                    \
+  event got_curr_##num(                                                        \
+      unsigned long *dests_unused, unsigned long neighbor_degree,              \
+      unsigned long edges_before_unused, unsigned long neighbor_vertex_id,     \
+      unsigned long neighbor_color) {                                          \
+    /* algorithm specific */                                                   \
+    unsigned long *local child_data;                                           \
+    local_child_data_ptr(child_data);                                          \
+    unsigned long vertex_id = ref_child_vertex_id(child_data, num);            \
+    unsigned long currentColor = ref_child_color(child_data, num);             \
+    num_vertices_visited = num_vertices_visited + 1;                           \
+    if (currentColor < neighbor_color && neighbor_color != -1) {               \
+        /* print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", \
+             vertex_id, currentColor, neighbor_color);    */                    \
+        ref_child_color(child_data, num) = neighbor_color;                     \
+        currentColor = neighbor_color;                                         \
+        /* inform the callers that a color was updated */                      \
+        /* the callers will then ensure that multiple iterations are called */ \
+        num_vertices_updated = num_vertices_updated + 1;                       \
+    }                                                                          \
+    unsigned long num_left = ref_child_numleft(child_data, num) - 1;           \
+    ref_child_numleft(child_data, num) = num_left;                             \
+    if (num_left == 0) {                                                       \
+      unsigned long continuationWord = evw_update_event(CEVNT, done_##num);    \
+      /*if(num_vertices_updated == 0) {                                        \
+        send_event(continuationWord, 0, IGNRCONT);                             \
+        yield;                                                                 \
+      } */                                                                     \
+      /* store the new data in the DRAM */                                     \
+      unsigned long *loc = graph + (vertex_id * vertex_size) + 32;             \
+      send_dram_write(loc, currentColor, continuationWord);                    \
+    }                                                                          \
+  }
+
+  // clang-format off
+    got_curr_event(0) 
+    got_curr_event(1) 
+    got_curr_event(2)
+    got_curr_event(3) 
+    got_curr_event(4)
+  // clang-format on
+
+    event
+    ignore3() {}
+
+#define done_event(num)                                                        \
+  event done_##num() {                                                         \
+    finished_vertexs = finished_vertexs + vertex_size;                         \
+    if (finished_vertexs == end_vertexs) {                                     \
+       num_vertices_visited = num_vertices_visited << 32;                      \
+       num_vertices_updated = num_vertices_visited | num_vertices_updated;     \
+      if (remaining_nodes == 0) {                                              \
+        send_event(CCONT, 0, num_vertices_updated, 0, IGNRCONT);               \
+        yield_terminate;                                                       \
+      }                                                                        \
+      send_event(CCONT, 0, num_vertices_updated,                               \
+                evw_update_event(CEVNT, run_iter), IGNRCONT);                  \
+      num_vertices_updated = 0;                                                \
+      num_vertices_visited = 0;                                                \
+      yield;                                                                   \
+    }                                                                          \
+    if (vertexs < end_vertexs) {                                               \
+      unsigned long continuationWord =                                         \
+          evw_update_event(CEVNT, offsets_loaded_##num);                       \
+      send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);                \
+      vertexs = vertexs + (vertex_size);                                       \
+    }                                                                          \
+  }
+  // clang-format off
+    done_event(0) 
+    done_event(1) 
+    done_event(2)
+    done_event(3) 
+    done_event(4)
+  // clang-format on
+
+  event
+  ignore4() {}
+
+  event run_iter(long stop_if_neg_1) {
+    ASSERT_UDW_NON_ZERO(remaining_nodes);
+    // print("CCONT = %lx", CCONT);
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    unsigned long dist = end_vertexs - start_vertexs;
+    remaining_nodes = dist / (vertex_size);
+    vertexs = start_vertexs;
+    finished_vertexs = start_vertexs;
+
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    unsigned long continuationWord = evw_update_event(CEVNT, offsets_loaded_0);
+    send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+
+    vertexs = vertexs + (vertex_size);
+    if (vertexs < end_vertexs) {
+      continuationWord = evw_update_event(CEVNT, offsets_loaded_1);
+      send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+      vertexs = vertexs + (vertex_size);
+      if (vertexs < end_vertexs) {
+        continuationWord = evw_update_event(CEVNT, offsets_loaded_2);
+        send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+        vertexs = vertexs + (vertex_size);
+        if (vertexs < end_vertexs) {
+          continuationWord = evw_update_event(CEVNT, offsets_loaded_3);
+          send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+          vertexs = vertexs + (vertex_size);
+          if (vertexs < end_vertexs) {
+            continuationWord = evw_update_event(CEVNT, offsets_loaded_4);
+            send_dram_read(vertexs, VERTEX_FIELDS_COLORING, continuationWord);
+            vertexs = vertexs + (vertex_size);
+          }
+        }
+      }
+    }
+  }
+}
+
+thread process_vertex_on_one_lane_Coloring_MULTI {
+
+  unsigned long *start_edges;
+  unsigned long *edges;
+  unsigned long *edges_end;
+  long left_to_write;
+  unsigned long vertex_id;
+  unsigned long degree;
+
+  unsigned long *graph;
+
+  unsigned long color;
+  unsigned long num_vertices_updated;
+  unsigned long num_vertices_visited;
+
+  event start(unsigned long *edges_, unsigned long degree_,
+              unsigned long vertex_id_, unsigned long *graph_,
+              unsigned long color_) {
+    ASSERT_UDW_NON_ZERO(degree_);
+    graph = graph_;
+    start_edges = edges_;
+    edges = edges_;
+    degree = degree_;
+    edges_end = edges_ + (degree_ * sizeof(long));
+    left_to_write = degree_;
+    vertex_id = vertex_id_;
+    color = color_;
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    int iters = degree_ / 8;
+    if (iters * 8 < degree_) {
+      iters = iters + 1;
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+
+  event got_sources(
+      unsigned long data0, unsigned long data1, unsigned long data2,
+      unsigned long data3, unsigned long data4, unsigned long data5,
+      unsigned long data6, unsigned long data7, unsigned long *loc) {
+    ASSERT_UDW_NON_NEGATIVE(left_to_write);
+    unsigned long remaining_words = (edges_end - loc);
+    remaining_words = remaining_words / sizeof(long);
+    ASSERT_UDW_NON_NEGATIVE(remaining_words);
+    unsigned long cont = evw_update_event(CEVNT, got_curr);
+    if (remaining_words > 8) {
+
+      array_load8(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+      if (edges < edges_end) {
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+        // +64 is 8 words each 8 bytes in size
+        edges = edges + 64;
+      }
+      yield;
+    }
+
+    if (remaining_words >= 5) {
+      if (remaining_words >= 7) {
+        if (remaining_words == 8) {
+          array_load8(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else {
+          array_load7(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+
+      } else { // cases for 5 or 6
+        if (remaining_words == 6) {
+          array_load6(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else { // remaining_words == 5
+          array_load5(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+      }
+    } else {
+      if (remaining_words >= 3) {
+        if (remaining_words == 4) {
+          array_load4(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else { // remaining_words == 3
+          array_load3(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+      } else { // cases for 1 or 0
+        if (remaining_words == 2) {
+          array_load2(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else { // remaining_words == 1
+          array_load(graph, data0, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+      }
+    }
+  }
+
+  event got_curr(unsigned long *dests_unused, unsigned long neighbor_degree,
+                 unsigned long edges_before_unused,
+                 unsigned long neighbor_vertex_id, unsigned long neighbor_color) {
+
+    // algorithm specific
+    num_vertices_visited = num_vertices_visited + 1;
+    if (color < neighbor_color && neighbor_color != -1) {
+      // print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", vertex_id, color, neighbor_color);
+      color = neighbor_color;
+      num_vertices_updated = num_vertices_updated + 1;
+    }
+
+    left_to_write = left_to_write - 1;
+    if (left_to_write == 0) {
+      unsigned long continuationWord = evw_update_event(CEVNT, done);
+      // if(num_vertices_updated == 0) {
+      //   send_event(continuationWord, 0, evw_update_event(CEVNT, run_iter), IGNRCONT);
+      //   yield;
+      // }
+
+      // store the new data in the vector
+      unsigned long *loc = graph + (vertex_id * vertex_size) + 32;
+      send_dram_write(loc, color, continuationWord);
+    }
+  }
+
+  event done() {
+    ASSERT_UDW_ZERO(left_to_write);
+    num_vertices_visited = num_vertices_visited << 32;
+    num_vertices_updated = num_vertices_visited | num_vertices_updated;
+    send_event(CCONT, color, num_vertices_updated, evw_update_event(CEVNT, run_iter), IGNRCONT);
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+  }
+
+  event run_iter(long stop_if_neg_1) {
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+
+    edges = start_edges;
+    left_to_write = degree;
+
+    int iters = degree / 8;
+    if (iters * 8 < degree) {
+      iters = iters + 1;
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+}
+
+thread process_partial_vertex_on_one_lane_Coloring_MULTI {
+
+  unsigned long *start_edges;
+  unsigned long *edges;
+  unsigned long *edges_end;
+  long left_to_write;
+  unsigned long vertex_id;
+  unsigned long degree;
+
+  unsigned long *graph;
+
+  unsigned long color;
+  unsigned long num_vertices_updated;
+  unsigned long num_vertices_visited;
+
+  event start(unsigned long *edges_, unsigned long degree_,
+              unsigned long vertex_id_, unsigned long *graph_,
+              unsigned long color_, unsigned long num_vertices_updated_) {
+    ASSERT_UDW_NON_ZERO(degree_);
+    graph = graph_;
+    start_edges = edges_;
+    edges = edges_;
+    degree = degree_;
+    color = color_;
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+    edges_end = edges_ + (degree_ * sizeof(long));
+    left_to_write = degree_;
+    vertex_id = vertex_id_;
+
+    int iters = degree_ / 8;
+    if (iters * 8 < degree_) {
+      iters = iters + 1;
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+  event got_sources(
+      unsigned long data0, unsigned long data1, unsigned long data2,
+      unsigned long data3, unsigned long data4, unsigned long data5,
+      unsigned long data6, unsigned long data7, unsigned long *loc) {
+    ASSERT_UDW_NON_NEGATIVE(left_to_write);
+    unsigned long remaining_words = (edges_end - loc);
+    remaining_words = remaining_words / sizeof(long);
+    ASSERT_UDW_NON_NEGATIVE(remaining_words);
+    unsigned long cont = evw_update_event(CEVNT, got_curr);
+    if (remaining_words > 8) {
+      array_load8(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+      if (edges < edges_end) {
+        send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+        // +64 is 8 words each 8 bytes in size
+        edges = edges + 64;
+      }
+      yield;
+    }
+
+    if (remaining_words >= 5) {
+      if (remaining_words >= 7) {
+        if (remaining_words == 8) {
+          array_load8(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else {
+          array_load7(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+
+      } else { // cases for 5 or 6
+        if (remaining_words == 6) {
+          array_load6(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else { // remaining_words == 5
+          array_load5(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+      }
+    } else {
+      if (remaining_words >= 3) {
+        if (remaining_words == 4) {
+          array_load4(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else { // remaining_words == 3
+          array_load3(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+      } else { // cases for 1 or 0
+        if (remaining_words == 2) {
+          array_load2(graph, data, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        } else { // remaining_words == 1
+          array_load(graph, data0, vertex_size, VERTEX_FIELDS_COLORING, cont);
+          yield;
+        }
+      }
+    }
+  }
+
+  event got_curr(unsigned long *dests_unused, unsigned long neighbor_degree,
+                 unsigned long edges_before_unused,
+                 unsigned long neighbor_vertex_id, unsigned long neighbor_color) {
+    // algorithm specific
+    left_to_write = left_to_write - 1;
+    num_vertices_visited = num_vertices_visited + 1;
+    if (color < neighbor_color && neighbor_color != -1) {
+      // print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", vertex_id, color, neighbor_color);
+      color = neighbor_color;
+      num_vertices_updated = num_vertices_updated + 1;
+    }
+
+    if (left_to_write == 0) {
+      num_vertices_visited = num_vertices_visited << 32;
+      num_vertices_updated = num_vertices_visited | num_vertices_updated;
+      send_event(CCONT, color, num_vertices_updated, evw_update_event(CEVNT, run_iter), IGNRCONT);
+      num_vertices_updated = 0;
+      num_vertices_visited = 0;
+    }
+  }
+
+  event run_iter(long stop_if_neg_1) {
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    edges = start_edges;
+    left_to_write = degree;
+
+    int iters = degree / 8;
+    if (iters * 8 < degree) {
+      iters = iters + 1;
+    }
+    if (iters > MAX_OUTSTANDING_READ_REQUESTS) {
+      iters = MAX_OUTSTANDING_READ_REQUESTS;
+    }
+    while (iters > 0) {
+      send_dram_read(edges, 8, evw_update_event(CEVNT, got_sources));
+      // +64 is 8 words each 8 bytes in size
+      edges = edges + 64;
+      iters = iters - 1;
+    }
+  }
+}
+
+thread process_vertex_Coloring_MULTI {
+  unsigned long counter;
+  unsigned long degree;
+
+  unsigned long vertex_id;
+
+  unsigned long left_child;
+  unsigned long right_child;
+
+  unsigned long color;
+  unsigned long num_vertices_updated;
+  unsigned long num_vertices_visited;
+
+  unsigned long *graph;
+
+  event start(unsigned long *edges, unsigned long degree_,
+              unsigned long vertex_id_, unsigned long *graph_,
+              unsigned long color_, unsigned long unused,
+              unsigned long num_lanes, int lane_start, unsigned long depth) {
+    ASSERT_UDW_NON_ZERO(degree_);
+
+    if (num_lanes <= 1 || degree_ <= 32) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_vertex_on_one_lane_Coloring_MULTI::start);
+#ifdef ENABLE_SEND_TO_SHORTEST
+      send_ops(evwWord, edges, 6, CCONT, SP_SHORTEST); // TODO incorrect syntax
+#else
+      send_ops(evwWord, edges, 6, CCONT);
+#endif
+      yield;
+    }
+
+    degree = degree_;
+    vertex_id = vertex_id_;
+
+    graph = graph_;
+    color = color_;
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    // else split up the work and do some by each child
+    unsigned long edges_per_split = degree >> 1;
+    unsigned long lanes_per_split = num_lanes >> 1;
+
+    if (edges_per_split % 8 != 0) {
+      edges_per_split = edges_per_split >> 3;
+      edges_per_split = edges_per_split;
+      edges_per_split = edges_per_split << 3;
+    }
+
+    unsigned long *local args = args_scratch_space;
+    if (1) {
+      args[0] = edges;
+      args[1] = edges_per_split;
+      args[2] = vertex_id;
+      args[3] = graph_;
+      args[4] = color;
+      args[5] = 0; // unused
+      args[6] = lanes_per_split;
+      args[7] = lane_start;
+      args[8] = depth + 1;
+      int id = FAKE_COMBINE_LANES(lane_start);
+      unsigned long evwWord = evw_new(id, recurse);
+      unsigned long continuationWord = evw_update_event(CEVNT, done_left_final);
+      send_event(evwWord, args, 9, continuationWord);
+    }
+    if (1) {
+      // reusing register
+      if (1) {
+        counter = (edges_per_split * sizeof(long));
+        args[0] = edges + counter;
+        args[1] = degree - edges_per_split;
+        // args[2] = edges_before_unused + edges_per_split;
+        // args[3] = vertex_id;
+        args[6] = num_lanes - lanes_per_split;
+      }
+      int id = lane_start + lanes_per_split;
+      args[7] = id;
+      id = FAKE_COMBINE_LANES(id);
+      unsigned long evwWord = evw_new(id, recurse);
+      counter = evw_update_event(CEVNT, done_right_final);
+      send_event(evwWord, args, 9, counter);
+    }
+
+    counter = 2;
+  }
+
+  // No need to call score or color.
+  // will return to done_left and done_right'
+  event recurse(unsigned long *edges, unsigned long degree_,
+                unsigned long vertex_id_, unsigned long *graph_,
+                unsigned long color_, unsigned long unused,
+                unsigned long num_lanes, int lane_start, unsigned long depth) {
+    if (num_lanes <= 1 || degree_ <= 32) {
+      unsigned long evwWord = evw_update_event(
+          CEVNT, process_partial_vertex_on_one_lane_Coloring_MULTI::start);
+#ifdef ENABLE_SEND_TO_SHORTEST
+      send_ops(evwWord, edges, 6, CCONT, SP_SHORTEST);  // TODO incorrect syntax
+#else
+      send_ops(evwWord, edges, 6, CCONT);
+#endif
+      yield;
+    }
+
+    degree = degree_;
+    vertex_id = vertex_id_;
+
+    graph = graph_;
+    color = color_;
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+
+    // else split up the work and do some by each child
+    unsigned long edges_per_split = degree >> 1;
+    unsigned long lanes_per_split = num_lanes >> 1;
+
+    if (edges_per_split % 8 != 0) {
+      edges_per_split = edges_per_split >> 3;
+      edges_per_split = edges_per_split;
+      edges_per_split = edges_per_split << 3;
+    }
+
+    unsigned long *local args = args_scratch_space;
+    if (1) {
+      args[0] = edges;
+      args[1] = edges_per_split;
+      args[2] = vertex_id;
+      args[3] = graph_;
+      args[4] = color;
+      args[5] = 0;
+      args[6] = lanes_per_split;
+      args[7] = lane_start;
+      args[8] = depth + 1;
+      int id = FAKE_COMBINE_LANES(lane_start);
+      unsigned long evwWord = evw_new(id, recurse);
+      unsigned long continuationWord = evw_update_event(CEVNT, done_left);
+      send_event(evwWord, args, 9, continuationWord);
+    }
+    if (1) {
+      // reusing register
+      if (1) {
+        counter = (edges_per_split * sizeof(long));
+        args[0] = edges + counter;
+        args[1] = degree - edges_per_split;
+        // args[2] = edges_before_unused + edges_per_split;
+        // args[3] = vertex_id;
+        args[6] = num_lanes - lanes_per_split;
+      }
+      int id = lane_start + lanes_per_split;
+      args[7] = id;
+      id = FAKE_COMBINE_LANES(id);
+      unsigned long evwWord = evw_new(id, recurse);
+      counter = evw_update_event(CEVNT, done_right);
+      send_event(evwWord, args, 9, counter);
+    }
+
+    counter = 2;
+  }
+
+  event done_left(unsigned long child_color, unsigned long num_vertices_updated_,
+                  unsigned long new_child) {
+    left_child = new_child;
+
+    unsigned long visited = num_vertices_updated_ >> 32;
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32;
+    num_vertices_visited = num_vertices_visited + visited + 1;
+    num_vertices_updated = num_vertices_updated + updated;
+    if (color < child_color && child_color != -1) {
+      // print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", vertex_id, color, child_color);
+      color = child_color;
+      num_vertices_updated = num_vertices_updated + 1;
+    }
+
+    if (counter == 1) {
+      num_vertices_visited = num_vertices_visited << 32;
+      num_vertices_updated = num_vertices_visited | num_vertices_updated;
+      send_event(CCONT, color, num_vertices_updated, evw_update_event(CEVNT, run_iter), IGNRCONT);
+      num_vertices_updated = 0;
+      num_vertices_visited = 0;
+      yield;
+    }
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;
+  }
+
+  event done_right(unsigned long child_color, unsigned long num_vertices_updated_,
+                   unsigned long new_child) {
+    right_child = new_child;
+    unsigned long visited = num_vertices_updated_ >> 32;
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32;
+    num_vertices_visited = num_vertices_visited + visited + 1;
+    num_vertices_updated = num_vertices_updated + updated;
+    
+    if (color < child_color && child_color != -1) {
+      // print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", vertex_id, color, child_color);
+      color = child_color;
+      num_vertices_updated = num_vertices_updated + 1;
+    }
+
+    if (counter == 1) {
+      num_vertices_visited = num_vertices_visited << 32;
+      num_vertices_updated = num_vertices_visited | num_vertices_updated;
+      send_event(CCONT, color, num_vertices_updated, evw_update_event(CEVNT, run_iter), IGNRCONT);
+      num_vertices_updated = 0;
+      num_vertices_visited = 0;
+      yield;
+    }
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;
+  }
+
+  // Todo done left final
+  event done_left_final(unsigned long child_color, unsigned long num_vertices_updated_,
+                        unsigned long new_child) {
+    ASSERT_UDW_NON_ZERO(counter);
+    left_child = new_child;
+
+    unsigned long visited = num_vertices_updated_ >> 32;
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32;
+    num_vertices_visited = num_vertices_visited + visited + 1;
+    num_vertices_updated = num_vertices_updated + updated;
+
+    if (color < child_color && child_color != -1) {
+      // print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", vertex_id, color, child_color);
+      color = child_color;
+      num_vertices_updated = num_vertices_updated + 1;
+    }
+
+    if (counter == 1) {
+      unsigned long continuationWord = evw_update_event(CEVNT, done_write);
+      counter = 0;
+      // if(num_vertices_updated == 0) {
+      //   send_event(continuationWord, 0, IGNRCONT);
+      //   yield;
+      // }
+
+      unsigned long *loc = graph + (vertex_id * vertex_size) + 32;
+      send_dram_write(loc, color, continuationWord);
+      yield;
+    }
+
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;
+  }
+
+  // Todo done right final
+  event done_right_final(unsigned long child_color, unsigned long num_vertices_updated_,
+                         unsigned long new_child) {
+
+    ASSERT_UDW_NON_ZERO(counter);
+    right_child = new_child;
+
+    unsigned long visited = num_vertices_updated_ >> 32;
+    unsigned long updated = (num_vertices_updated_ << 32) >> 32;
+    num_vertices_visited = num_vertices_visited + visited + 1;
+    num_vertices_updated = num_vertices_updated + updated;
+
+    if (color < child_color && child_color != -1) {
+      // print("Color updated: vertex ID: %lu, cur color: %lu, new color: %lu", vertex_id, color, child_color);
+      color = child_color;
+      num_vertices_updated = num_vertices_updated + 1;
+    }
+
+    if (counter == 1) {
+      unsigned long continuationWord = evw_update_event(CEVNT, done_write);
+      counter = 0;
+      // if(num_vertices_updated == 0) {
+      //   send_event(continuationWord, 0, IGNRCONT);
+      //   yield;
+      // }
+
+      unsigned long *loc = graph + (vertex_id * vertex_size) + 32;
+      send_dram_write(loc, color, continuationWord);
+      yield;
+    }
+
+    ASSERT_UDW_EQUAL(counter, 2);
+    counter = 1;
+  }
+
+  event done_write() {
+
+    ASSERT_UDW_ZERO(counter);
+    num_vertices_visited = num_vertices_visited << 32;
+    num_vertices_updated = num_vertices_visited | num_vertices_updated;
+    send_event(CCONT, color, num_vertices_updated, 
+               evw_update_event(CEVNT, run_iter_top), IGNRCONT);
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+  }
+
+  event run_iter(long stop_if_neg_1) {
+    ASSERT_UDW_NON_ZERO(left_child);
+    ASSERT_UDW_NON_ZERO(right_child);
+    send_event(left_child, stop_if_neg_1, IGNRCONT);
+    send_event(right_child, stop_if_neg_1, IGNRCONT);
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+    counter = 2;
+  }
+
+  event run_iter_top(long stop_if_neg_1) {
+    ASSERT_UDW_NON_ZERO(left_child);
+    ASSERT_UDW_NON_ZERO(right_child);
+
+    send_event(left_child, stop_if_neg_1, IGNRCONT);
+    send_event(right_child, stop_if_neg_1, IGNRCONT);
+
+    if (stop_if_neg_1 == -1) {
+      yield_terminate;
+    }
+
+    num_vertices_updated = 0;
+    num_vertices_visited = 0;
+    counter = 2;
+  }
+}

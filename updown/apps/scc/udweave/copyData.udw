@@ -1,0 +1,107 @@
+#include "broadcast.udwh"
+#include "scc.udwh"
+// #define DEBUG_COPYDATA
+
+thread CopyData {
+	event start(unsigned long* src, unsigned long *dst, unsigned long numVertices, unsigned long numLanes) {
+
+
+		#ifdef DEBUG_COPYDATA
+			print("Start: src: %p, dst: %p, numVertices: %lu, numLanes: %lu", src, dst, numVertices, numLanes);
+		#endif
+
+		// distribute the work among all lanes available
+		unsigned long evw = evw_new(NETID, BROADCAST__broadcast_global);
+		unsigned long cont = evw_update_event(CEVNT, done);
+		unsigned long evw_broadcast = evw_new(NETID, BroadcastDataWorker::start);
+
+		unsigned long* local spPtr = args_scratch_space;
+		spPtr[0] = numLanes;
+		spPtr[1] = evw_broadcast;
+		copyOperands(src, spPtr + 2*sizeof(long), 4);
+		
+		// length and destination address in the LM is configured in the Broadcast receiver
+		send_event(evw, spPtr, 8, cont);
+	}
+
+	event done() {
+		#ifdef DEBUG_COPYDATA
+			print("finished");
+		#endif
+		unsigned long* local spPtr = LMBASE + TOP_FLAG_OFFSET;
+		spPtr[0] = 1;
+     	yield_terminate;
+	}
+}
+
+
+thread BroadcastDataWorker {
+	unsigned long *srcBase;
+	unsigned long *srcCurrentPointer;
+	unsigned long *dstBase;
+	unsigned long numVertices;
+	unsigned long counter;
+
+	event start(unsigned long* srcBase_, unsigned long *dstBase_, unsigned long numVertices_, unsigned long numLanes) {
+
+		// determine the numVertices
+		unsigned long laneOffset;
+		unsigned long base = numVertices_ / numLanes;
+		unsigned long remainder = numVertices_ % numLanes;
+		if(NETID < remainder) {
+			numVertices = base + 1; 
+			laneOffset = NETID;
+		} else {
+			numVertices = base;
+			laneOffset = remainder;
+		}
+
+		if(numVertices == 0) {
+			send_event(CCONT, IGNRCONT);
+			yield_terminate;
+		}
+		
+		// set the base addresses
+		unsigned long offsetStartAddress = (NETID * base + laneOffset) * sizeof(long) * 8; // size of vertex_t
+		srcBase = srcBase_ + offsetStartAddress;
+		dstBase = dstBase_ + offsetStartAddress;
+
+		#ifdef DEBUG_COPYDATA
+			print("Start: src: %p, dst: %p, numVertices: %lu, numLanes: %lu", srcBase_, dstBase_, numVertices_, numLanes);
+			print("\tsrcBase: %p, dstBase: %p, numVertices: %lu, remainder: %lu", srcBase, dstBase, numVertices, remainder);
+		#endif
+
+		srcCurrentPointer = srcBase + 32; // point to where the color is
+		counter = 0;
+
+		unsigned long cont = evw_update_event(CEVNT, returnFromRead);
+		for(unsigned long i=0; i<MAX_OUTSTANDING_READ_REQUESTS && numVertices>0; i++) {
+			send_dram_read(srcCurrentPointer, 2, returnFromRead);
+			srcCurrentPointer = srcCurrentPointer + vertex_size;
+			numVertices--;
+			counter++;
+		}
+	}
+
+	event returnFromRead(unsigned long color, unsigned long sccID, unsigned long* readAddress) {
+		unsigned long offset = readAddress - srcBase;
+		unsigned long* writeAddress = dstBase + offset;
+
+		send_dram_write_ops(writeAddress, color, 2, returnFromWrite);
+	}
+
+	event returnFromWrite() {
+		if(numVertices != 0) {
+			send_dram_read(srcCurrentPointer, 2, returnFromRead);
+			srcCurrentPointer = srcCurrentPointer + vertex_size;
+			numVertices--;
+		} else {
+			counter--;
+			if(counter == 0) {
+				// inform the broadcast library that we are done
+				send_event(CCONT, IGNRCONT);
+				yield_terminate;
+			}
+		}
+	}
+}

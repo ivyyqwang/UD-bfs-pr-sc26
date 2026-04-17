@@ -1,0 +1,314 @@
+#include "prefixSum.udwh"
+
+extern event PrefixSumDownAboveNodeLevel::start();
+
+thread PrefixSum {
+    uint64_t counter;
+    uint64_t expectedReturnValues;
+    uint64_t numLanes;
+    uint64_t* vertex;
+    uint64_t numVertices;
+    uint64_t maxDegree;
+
+
+    event start(uint64_t* vertex_, uint64_t numVertices_, uint64_t numLanes_) {
+
+        vertex = vertex_;
+        numVertices = numVertices_;
+        numLanes = numLanes_;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("ADDRESSES SCRATCHPAD:");
+            print("#define SPM_ADDRESS_MASTER = %lu", SPM_ADDRESS_MASTER);
+            print("#define SPM_ADDRESS_ABOVE_NODELEVEL = %lu", SPM_ADDRESS_ABOVE_NODELEVEL);
+            print("#define SPM_ADDRESS_NODE = %lu", SPM_ADDRESS_NODE);
+            print("#define SPM_ADDRESS_UD = %lu", SPM_ADDRESS_UD);
+            print("#define SPM_ADDRESS_LANE = %lu", SPM_ADDRESS_LANE);
+        #endif
+
+        print("start: vertex: %p, numVertices: %lu, numLanes: %lu", vertex, numVertices, numLanes_);
+
+        counter = 0;
+        maxDegree = 0;
+        
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        for(uint64_t i=0; i<numLanes; i=i+THRESHOLD_NODE_BC*2048) {
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending PrefixSumRequest to NETID: %lu", NETID+i);
+            #endif
+            uint64_t evw = evw_new(NETID+i, PrefixSumAboveNodeLevel::start);
+            send_ops(evw, vertex_, SEND_OPERANDS, cont);
+            counter++;
+        }
+
+        expectedReturnValues = counter;
+    }
+
+    event returnFromChild(uint64_t senderLaneID, uint64_t returnValue) {
+        uint64_t laneOffset = (senderLaneID - NETID) / (THRESHOLD_NODE_BC*2048) + 1;
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_MASTER;
+        spPtr[laneOffset] = returnValue;
+
+        counter--;
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: spPtr[%lu] = %lu (senderLaneID: %lu), remaining replies: %lu/%lu", laneOffset, returnValue, senderLaneID, counter, expectedReturnValues);
+        #endif
+        if(counter == 0) {
+            uint64_t netID = NETID;
+            uint64_t* local spPtrSend = LMBASE + SEND_BUFFER_OFFSET;
+            spPtrSend[0] = vertex;
+            spPtrSend[1] = numVertices;
+            spPtrSend[2] = numLanes;
+            spPtrSend[3] = 0; // prefix sum
+
+            uint64_t cont = evw_update_event(CEVNT, finishedAfterDown);
+            for(uint64_t i=0; i<expectedReturnValues; i++) {
+                spPtrSend[3] = spPtrSend[3] + spPtr[i];
+                
+                uint64_t evw = evw_new(netID, PrefixSumDownAboveNodeLevel::start);
+                send_event(evw, spPtrSend, 4, cont);
+                
+                #ifdef DEBUG_PREFIXSUM
+                    print("PrefixSum: i: %lu sent to lane %lu", spPtrSend[3], netID);
+                #endif
+                netID = netID + THRESHOLD_NODE_BC * 2048;
+            }
+
+            #ifdef DEBUG_PREFIXSUM
+                print("Final entry prefixSum: %lu", spPtr[expectedReturnValues]);
+            #endif
+        }
+    }
+
+    event finishedAfterDown(uint64_t maxDegree_) {
+        if(maxDegree_ > maxDegree) {
+            maxDegree = maxDegree_;
+        }
+
+        expectedReturnValues--;
+        if(expectedReturnValues == 0) {
+            print("done");
+            // we are done
+            uint64_t* local spPtr = LMBASE + TOP_FLAG_OFFSET;
+            spPtr[1] = maxDegree;
+            spPtr[0] = 1;
+            yield_terminate;
+        }
+    }
+}
+
+
+// distribute to the nodes
+thread PrefixSumAboveNodeLevel {
+    uint64_t counter;
+    uint64_t expectedReturnValues;
+    uint64_t sum;
+
+    event start(uint64_t* vertex, uint64_t numVertices, uint64_t numLanes) {
+
+        counter = 0;
+        sum = 0;
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu", vertex, numVertices, numLanes);
+        #endif
+        
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        uint64_t upperLimit = THRESHOLD_NODE_BC * 2048;
+        if(upperLimit > numLanes) {
+            upperLimit = numLanes;
+        }
+        for(uint64_t i=0; i<upperLimit; i=i+2048) {
+            uint64_t evw = evw_new(NETID+i, PrefixSumNodeLevel::start);
+            send_ops(evw, vertex, SEND_OPERANDS, cont);
+            counter++;
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending PrefixSumRequest to NETID: %lu", NETID+i);
+            #endif
+        }
+
+        expectedReturnValues = counter;
+    }
+
+    event returnFromChild(uint64_t senderLaneID, uint64_t returnValue) {
+        uint64_t laneOffset = (senderLaneID - NETID) / 2048 + 1;
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_ABOVE_NODELEVEL;
+        spPtr[laneOffset] = returnValue;
+        sum = sum + returnValue;
+        counter--;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: spPtr[%lu] = %lu (senderLaneID: %lu), remaining replies: %lu/%lu, partSum: %lu", laneOffset, returnValue, senderLaneID, counter, expectedReturnValues, sum);
+        #endif
+
+        if(counter == 0) {
+            send_event(CCONT, NETID, sum, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}
+
+
+// distribute among UDs
+thread PrefixSumNodeLevel {
+    uint64_t counter;
+    uint64_t sum;
+
+    event start(uint64_t* vertex, uint64_t numVertices, uint64_t numLanes) {
+
+        counter = 32;
+        sum = 0;
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu", vertex, numVertices, numLanes);
+        #endif
+
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        uint64_t numLanesPerNode = 2048;
+        for(uint64_t i=0; i<numLanesPerNode; i=i+64) {
+            uint64_t evw = evw_new(NETID+i, PrefixSumUDLevel::start);
+            send_ops(evw, vertex, SEND_OPERANDS, cont);
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending PrefixSumRequest to NETID: %lu", NETID+i);
+            #endif
+        }
+    }
+
+    event returnFromChild(uint64_t senderLaneID, uint64_t returnValue) {
+        uint64_t laneOffset = (senderLaneID - NETID) / 64 + 1;
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_NODE;
+        spPtr[laneOffset] = returnValue;
+        sum = sum + returnValue;
+        counter--;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: spPtr[%lu] = %lu (senderLaneID: %lu), remaining replies: %lu/32, partSum: %lu", laneOffset, returnValue, senderLaneID, counter, sum);
+        #endif
+        if(counter == 0) {
+            send_event(CCONT, NETID, sum, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}
+
+// distribute among the lanes
+thread PrefixSumUDLevel {
+    uint64_t counter;
+    uint64_t sum;
+
+    event start(uint64_t* vertex, uint64_t numVertices, uint64_t numLanes) {
+
+        sum = 0;
+        counter = 64;
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu", vertex, numVertices, numLanes);
+        #endif
+        
+        uint64_t cont = evw_update_event(CEVNT, returnFromChild);
+        uint64_t numLanesPerUD = 64;
+        for(uint64_t i=0; i<numLanesPerUD; i++) {
+
+            uint64_t evw = evw_new(NETID+i, PrefixSumWorkerUp::start);
+            send_ops(evw, vertex, SEND_OPERANDS, cont);
+            #ifdef DEBUG_PREFIXSUM
+                print("Sending PrefixSumRequest to NETID: %lu", NETID+i);
+            #endif
+        }
+    }
+
+
+    event returnFromChild(uint64_t senderLaneID, uint64_t returnValue) {
+        uint64_t laneOffset = senderLaneID - NETID + 1;
+        uint64_t* local spPtr = LMBASE + SPM_ADDRESS_UD;
+        spPtr[laneOffset] = returnValue;
+        sum = sum + returnValue;
+        counter--;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("Returning: spPtr[%lu] = %lu (senderLaneID: %lu), remaining replies: %lu/64, partSum: %lu", laneOffset, returnValue, senderLaneID, counter, sum);
+        #endif
+        if(counter == 0) {
+            send_event(CCONT, NETID, sum, IGNRCONT);
+            yield_terminate;
+        }
+    }
+}
+
+
+thread PrefixSumWorkerUp {
+    uint64_t *srcBase;
+    uint64_t numVertices;
+    uint64_t counter;
+    uint64_t partialSum;
+    
+    event start(uint64_t* srcBase_, uint64_t numVertices_, uint64_t numLanes) {
+
+        #ifdef DEBUG_PREFIXSUM
+            print("start: vertex: %p, numVertices: %lu, numLanes: %lu", srcBase_, numVertices_, numLanes);
+        #endif
+        
+        // determine the numVertices
+        uint64_t laneOffset;
+        uint64_t base = numVertices_ / numLanes;
+        uint64_t remainder = numVertices_ % numLanes;
+        if(NETID < remainder) {
+            numVertices = base + 1; 
+            laneOffset = NETID;
+        } else {
+            numVertices = base;
+            laneOffset = remainder;
+        }
+
+        if(numVertices == 0) {
+            #ifdef DEBUG_PREFIXSUM
+                print("Nothing to do, returning");
+            #endif
+            send_event(CCONT, NETID, 0, IGNRCONT);
+            yield_terminate;
+        }
+        
+        // set the base addresses
+        uint64_t offsetStartAddress = (NETID * base + laneOffset) * sizeof(long) * 8; // size of vertex_t
+        srcBase = srcBase_ + offsetStartAddress;
+
+        #ifdef DEBUG_PREFIXSUM
+            print("\tsrcBase: %p, numVertices: %lu, remainder: %lu", srcBase, numVertices, remainder);
+        #endif
+
+        srcBase = srcBase + 8; // point to where the degree is
+        counter = 0;
+        partialSum = 0;
+
+        uint64_t cont = evw_update_event(CEVNT, returnFromRead);
+        for(uint64_t i=0; i<MAX_OUTSTANDING_MEM_READ_REQUESTS && numVertices>0; i++) {
+            // print("Reading: %p", srcBase);
+            send_dram_read(srcBase, 1, returnFromRead);
+            srcBase = srcBase + vertex_size;
+            numVertices--;
+            counter++;
+        }
+    }
+
+    // event returnFromRead(uint64_t degree, uint64_t edgeBef, uint64_t vertID, uint64_t* readAddress) {
+    event returnFromRead(uint64_t degree, uint64_t* readAddress) {
+
+        partialSum = partialSum + degree;
+        // #ifdef DEBUG_PREFIXSUM
+        //     print("Vertex returned: ID: %lu, edgeBef: :%lu, degree: %lu, currentPartSum: %lu", vertID, edgeBef, degree, partialSum);
+        // #endif
+
+        if(numVertices != 0) {
+            send_dram_read(srcBase, 1, CEVNT);
+            srcBase = srcBase + vertex_size;
+            numVertices--;
+        } else {
+            counter--;
+            if(counter == 0) {
+                // inform the broadcast library that we are done
+                #ifdef DEBUG_PREFIXSUM
+                    print("Returning partSum: %lu", partialSum);
+                #endif
+                send_event(CCONT, NETID, partialSum, IGNRCONT);
+                yield_terminate;
+            }
+        }
+    }
+}

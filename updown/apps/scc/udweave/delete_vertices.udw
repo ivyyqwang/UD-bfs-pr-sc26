@@ -1,0 +1,190 @@
+#include "broadcast.udwh"
+#include "scc.udwh"
+// #define DEBUG_DELETE_VERTICES
+
+thread DeleteVertices {
+	unsigned long counter;
+	unsigned long verticesValid;
+	unsigned long verticesDeleted;
+	unsigned long verticesIgnored;
+
+	event start(unsigned long* vert0, unsigned long *vert1, unsigned long *vert2, unsigned long numVertices, unsigned long numLanes) {
+
+
+		#ifdef DEBUG_DELETE_VERTICES
+			print("Start: vert0: %p, vert1: %p, vert2: %p, numVertices: %lu, numLanes: %lu", vert0, vert1, vert2, numVertices, numLanes);
+		#endif
+
+		// distribute the work among all lanes available
+		unsigned long evw = evw_new(NETID, BroadcastReduction::start);
+		unsigned long cont = evw_update_event(CEVNT, doneCollectInformation);
+		unsigned long evw_broadcast = evw_new(NETID, BroadcastDeleteWorker::start);
+
+		unsigned long* local spPtr = args_scratch_space;
+		spPtr[0] = numLanes;
+		spPtr[1] = evw_broadcast;
+		spPtr[2] = vert0;
+		spPtr[3] = numVertices;
+		spPtr[4] = numLanes;
+		
+		// length and destination address in the LM is configured in the Broadcast receiver
+		send_event(evw, spPtr, 8, cont);
+
+		cont = evw_update_event(CEVNT, doneDiscardInformation);
+		spPtr[2] = vert1;
+		send_event(evw, spPtr, 8, cont);
+
+		spPtr[2] = vert2;
+		send_event(evw, spPtr, 8, cont);
+
+		counter = 3;
+	}
+
+	event doneCollectInformation(unsigned long verticesValid_, unsigned long verticesDeleted_, unsigned long verticesIgnored_) {
+		#ifdef DEBUG_DELETE_VERTICES
+			print("finished: verticesValid: %lu, verticesDeleted: %lu, verticesIgnored: %lu", verticesValid_, verticesDeleted_, verticesIgnored_);
+		#endif
+
+		counter--;
+		if(counter == 0) {
+			unsigned long* local spPtr = LMBASE + TOP_FLAG_OFFSET;
+			spPtr[1] = verticesValid_;
+			spPtr[2] = verticesDeleted_;
+			spPtr[3] = verticesIgnored_;
+			spPtr[0] = 1;
+	     	yield_terminate;
+	    } else {
+			verticesValid = verticesValid_;
+			verticesDeleted = verticesDeleted_;
+			verticesIgnored = verticesIgnored_;
+		}
+	}
+
+	event doneDiscardInformation() {
+		#ifdef DEBUG_DELETE_VERTICES
+			print("finished Ignoring info, current info: verticesValid: %lu, verticesDeleted: %lu, verticesIgnored: %lu", verticesValid, verticesDeleted, verticesIgnored);
+		#endif
+
+		counter--;
+		if(counter == 0) {
+			unsigned long* local spPtr = LMBASE + TOP_FLAG_OFFSET;
+			spPtr[1] = verticesValid;
+			spPtr[2] = verticesDeleted;
+			spPtr[3] = verticesIgnored;
+			spPtr[0] = 1;
+	     	yield_terminate;
+		}
+	}
+}
+
+
+thread BroadcastDeleteWorker {
+	unsigned long *srcBase;
+	unsigned long *srcCurrentPointer;
+	unsigned long *dstBase;
+	unsigned long numVertices;
+	unsigned long counter;
+	unsigned long sumLeft; // valid vertices (degree != 0 && color != -1)
+	unsigned long sumDeleted; // deleted vertices
+	unsigned long sumIgnored; // ignored vertices
+
+	event start(unsigned long* srcBase_, unsigned long numVertices_, unsigned long numLanes) {
+
+		// determine the numVertices
+		unsigned long laneOffset;
+		unsigned long base = numVertices_ / numLanes;
+		unsigned long remainder = numVertices_ % numLanes;
+		if(NETID < remainder) {
+			numVertices = base + 1; 
+			laneOffset = NETID;
+		} else {
+			numVertices = base;
+			laneOffset = remainder;
+		}
+
+		if(numVertices == 0) {
+			// #ifdef DEBUG_DELETE_VERTICES
+			// 	print("Returning sum: 0");
+			// #endif
+			uint64_t zero = 0;
+			send_event(CCONT, zero, zero, zero, IGNRCONT);
+			yield_terminate;
+		}
+		
+		// set the base addresses
+		unsigned long offsetStartAddress = (NETID * base + laneOffset) * sizeof(long) * 8; // size of vertex_t
+		srcBase = srcBase_ + offsetStartAddress;
+
+		#ifdef DEBUG_DELETE_VERTICES
+			print("Start: srcBase: %p, vert1: %p, vert2: %p, numVertices: %lu, numLanes: %lu", srcBase_, numVertices_, numLanes);
+			print("\tsrcBase_: %p, numVertices: %lu, remainder: %lu", srcBase, numVertices, remainder);
+		#endif
+
+		srcCurrentPointer = srcBase + 8; // point to where the degree is
+		counter = 0;
+		sumLeft = 0;
+		sumDeleted = 0;
+		sumIgnored = 0;
+
+		unsigned long cont = evw_update_event(CEVNT, returnFromRead);
+		for(unsigned long i=0; i<MAX_OUTSTANDING_READ_REQUESTS && numVertices>0; i++) {
+			send_dram_read(srcCurrentPointer, 4, returnFromRead);
+			srcCurrentPointer = srcCurrentPointer + vertex_size;
+			numVertices--;
+			counter++;
+		}
+	}
+
+	event returnFromRead(unsigned long degree, unsigned long edges_before, unsigned long vertex_id, unsigned long color, unsigned long* readAddress) {
+
+		if(color == -1 && degree != 0) {
+			#ifdef DEBUG_DELETE_VERTICES
+				print("Deleting vertex ID: %lu, %lu", vertex_id, counter);
+			#endif
+			unsigned long zero = 0;
+			send_dram_write(readAddress, zero, returnFromWrite);
+			counter++;
+			sumDeleted++;
+		} elif(degree != 0) {
+			#ifdef DEBUG_DELETE_VERTICES
+				print("Discovered valid vertex ID: %lu, degree: %lu", vertex_id, degree);
+			#endif
+			send_dram_write(readAddress+24, vertex_id, returnFromWrite);
+			counter++;
+			sumLeft++;
+		} else { // degree == 0
+			sumIgnored++;
+			#ifdef DEBUG_DELETE_VERTICES
+				print("Skipping invalid vertex ID: %lu, degree: %lu", vertex_id, degree);
+			#endif
+		}
+
+		if(numVertices != 0) {
+			send_dram_read(srcCurrentPointer, 4, CEVNT);
+			srcCurrentPointer = srcCurrentPointer + vertex_size;
+			numVertices--;
+		} else {
+			counter--;
+			if(counter == 0) {
+				#ifdef DEBUG_DELETE_VERTICES
+					print("Returning sum: %lu", sum);
+				#endif
+				// inform the broadcast library that we are done
+				send_event(CCONT, sumLeft, sumDeleted, sumIgnored, IGNRCONT);
+				yield_terminate;
+			}
+		}
+	}
+
+	event returnFromWrite() {
+		counter--;
+		if(counter == 0) {
+			#ifdef DEBUG_DELETE_VERTICES
+				print("Returning sum: %lu", sum);
+			#endif
+			// inform the broadcast library that we are done
+			send_event(CCONT, sumLeft, sumDeleted, sumIgnored, IGNRCONT);
+			yield_terminate;
+		}
+	}
+}

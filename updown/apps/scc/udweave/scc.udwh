@@ -1,0 +1,160 @@
+#include "LMStaticMap.udwh"
+
+#define VERTEX_FIELDS 6
+
+// Here, the number of updates performed by the BFS is stored
+#define BFS_NUM_UPDATES_FIELD 8
+
+#define uint64_t unsigned long
+
+// 8 children each with three words of data each taking 8 bytes
+// can also be 6 children each with 4 words of data each taking 8 bytes
+// can also be 6 childen with 5 words each
+#define DATA_PER_THREAD (30 * 8)
+#define vertex_size (8 * 8)
+#define VERTEX_WORK_FACTOR 8
+#define FORCE_FIRST_NODE 3
+#define MAX_OUTSTANDING_READ_REQUESTS 10
+
+#define args_scratch_space (LMBASE + (HEAP_OFFSET + 64))
+#define child_data_location (LMBASE + (((HEAP_OFFSET + 64) + 128) + 128))
+#define FAKE_SPREAD_LANES(lane) ((lane) << 5)
+#define FAKE_COMBINE_LANES(lane) ((lane) >> 5)
+#define SWITCH_TO_SPLIT_2 2048
+
+
+#define ENABLE_ASSERTS 1
+
+#if ENABLE_ASSERTS == 1
+#define ASSERT_UDW_NON_ZERO(value)                                             \
+  if ((value) == 0) {                                                          \
+    print(#value " had a value of zero, required nonzero");                    \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_EQUAL(v1, v2)                                               \
+  if ((v1) != (v2)) {                                                          \
+    print(#v1 " did not equal " #v2);                                          \
+    print(#v1 " = %d, " #v2 " = %d", v1, v2);                                  \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_ZERO(value)                                                 \
+  if ((value) != 0) {                                                          \
+    print(#value " did not had a value of zero, required zero");               \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_NON_NEGATIVE(value)                                         \
+  if ((value) < 0) {                                                           \
+    print(#value " had a value of %d, required non negative", value);          \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#else
+#define ASSERT_UDW_NON_ZERO(value)                                             \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_EQUAL(v1, v2)                                               \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_ZERO(value)                                                 \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_NON_NEGATIVE(value)                                         \
+  if (1) {                                                                     \
+  }
+#endif
+
+
+// A macro which declares a local pointer and writes a 1 to the address
+// LMBASE + TOP_FLAG_OFFSET indicating to the TOP core, that we completed
+// UpDown program execution.
+#define EXIT                                                                   \
+  unsigned long *local spPtrExit = LMBASE;                                     \
+  spPtrExit[TOP_FLAG_OFFSET] = 1
+
+#define local_child_data_ptr(ptr)                                              \
+  if (1) {                                                                     \
+    ptr = child_data_location;                                                 \
+    ptr = ptr + (TID * DATA_PER_THREAD);                                       \
+  }
+
+#define ref_child_event(ptr, num) ptr[0 + (num * 3)]
+
+#define set_child_event(child, num)                                            \
+  if (1) {                                                                     \
+    unsigned long *local args_UNIQUE_ID = child_data_location;                 \
+    args_UNIQUE_ID = args_UNIQUE_ID + (TID * DATA_PER_THREAD);                 \
+    args_UNIQUE_ID[0 + (num * 3)] = child;                                     \
+  }
+
+#define get_child_event(child, num)                                            \
+  if (1) {                                                                     \
+    unsigned long *local args_UNIQUE_ID = child_data_location;                 \
+    args_UNIQUE_ID = args_UNIQUE_ID + (TID * DATA_PER_THREAD);                 \
+    child = args_UNIQUE_ID[0 + (num * 3)];                                     \
+  }
+
+#define array_load(array, offset, scale, size, cont)                           \
+  if (1) {                                                                     \
+    send_dram_read((array) + (offset * scale), size, cont);                    \
+  }
+
+#define array_load8(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+    array_load(array, base_var_offset##5, scale, size, cont);                  \
+    array_load(array, base_var_offset##6, scale, size, cont);                  \
+    array_load(array, base_var_offset##7, scale, size, cont);                  \
+  }
+#define array_load7(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+    array_load(array, base_var_offset##5, scale, size, cont);                  \
+    array_load(array, base_var_offset##6, scale, size, cont);                  \
+  }
+#define array_load6(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+    array_load(array, base_var_offset##5, scale, size, cont);                  \
+  }
+#define array_load5(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+    array_load(array, base_var_offset##4, scale, size, cont);                  \
+  }
+#define array_load4(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+    array_load(array, base_var_offset##3, scale, size, cont);                  \
+  }
+#define array_load3(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+    array_load(array, base_var_offset##2, scale, size, cont);                  \
+  }
+#define array_load2(array, base_var_offset, scale, size, cont)                 \
+  if (1) {                                                                     \
+    array_load(array, base_var_offset##0, scale, size, cont);                  \
+    array_load(array, base_var_offset##1, scale, size, cont);                  \
+  }
+
