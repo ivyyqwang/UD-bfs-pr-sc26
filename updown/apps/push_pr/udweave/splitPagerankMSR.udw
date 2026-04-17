@@ -1,0 +1,372 @@
+#define TOP_SYNC_OFFSET 0
+#define SEND_BUFFER_OFFSET 8
+#define KVMSR_META_DATA_OFFSET (640)
+#define INPUT_KVSET_METADATA_OFFSET (768)
+// #define GRAPH_PTR_OFFSET (768)
+#define OUTPUT_METADATA_OFFSET (832)
+
+#define MAX_FETCH_NLIST_SIZE (16)
+#define WORD_SIZE (8)
+#define LOG2_WORD_SIZE (3)
+#define DRAM_MSG_SIZE (8)
+#define DRAM_MSG_BSIZE (64)
+#define VERTEX_STRUCT_SIZE (8)
+#define VERTEX_STRUCT_BSIZE (64)
+#define LOG2_VERTEX_STRUCT_BSIZE (6)
+
+#define MAX_DRAM_LOADS (256)
+
+#define DEBUG_FLAG 0
+
+extern event splitPageRankMS::kv_map_emit();
+extern event splitPageRankMS::kv_map_return();
+extern event splitPageRankMS::map_shuffle_reduce();
+
+thread splitPageRankMS{
+    long vid;
+    long degree;
+    long* nlist_ptr;
+    double out_value;
+    long* nlist_bound;
+
+    long* sibling_addr;
+    long sibling_ptr;
+    double orig_degree;
+
+    long num_processed;
+    long emit_evw;
+    
+    event kv_map(long deg_op, long vid_op, long *neighbors_op, long orig_vid_op, long split_start_op, long split_bound_op, double val_op, unsigned long gv_bin, long* vertex_addr) {
+        
+        // The vertex has degree 0, skip it
+        if (deg_op == 0) {
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][kv_map] Vertex %ld (addr=0x%lx) has degree 0, return to UDKVMSR", NETID, vid_op, vertex_addr);
+            }
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid_op, CEVNT);
+            yield;
+        }
+
+        // if (vid_op == 0) {
+        //     print("[DEBUG][NWID %d][kv_map] Vertex %ld (addr=0x%lx) degree=%ld nlist_ptr=0x%lx val=%ld", NETID, vid_op, vertex_addr, deg_op, neighbors_op, val_op);
+        // }
+        vid = vid_op;
+        degree = deg_op;
+        sibling_ptr = split_start_op;
+
+        // Set the nlist pointer to the start of the neighbor list
+        // The nlist pointer is the address of the neighbor list in DRAM
+        // The nlist_bound is the end of the neighbor list
+        nlist_bound = neighbors_op + (deg_op << LOG2_WORD_SIZE);
+        nlist_ptr = neighbors_op;
+
+        if (vid_op != orig_vid_op) {
+        // if (deg_op == 0) {
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][kv_map] Vertex %ld is split, start merging pr values from sibling_start=%ld, sibling_bound=%ld, gv_bin=0x%lx", NETID, vid_op, sibling_ptr, split_bound_op, gv_bin);
+            }
+            // If the vertex is split, we need to pull the values from the sibling vertices
+
+            emit_evw = evw_update_event(CEVNT, sibling_rd_return);
+            long max_parallelism = MAX_DRAM_LOADS;
+            sibling_addr = gv_bin;
+            sibling_addr = sibling_addr + (sibling_ptr << LOG2_VERTEX_STRUCT_BSIZE);
+
+            // Issue DRAM read requests to fetch sibling vertices
+            num_processed = 0;
+            while ((sibling_ptr < split_bound_op) && num_processed < max_parallelism) {
+                send_dram_read(sibling_addr, VERTEX_STRUCT_SIZE, emit_evw);
+                sibling_ptr = sibling_ptr + 1;
+                sibling_addr = sibling_addr + VERTEX_STRUCT_BSIZE;
+                num_processed = num_processed + 1;
+            }
+            num_processed = 0;
+            out_value = 0.0; // Initialize out_value to 0.0 for the split case
+            orig_degree = 0;
+
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][kv_map] Sibling read initiated for vertex %ld, num_siblings=%ld", NETID, vid_op, sibling_ptr - split_start_op);
+            }
+            yield;
+        } else {
+            // If the vertex is not split, we can process it directly
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][kv_map] Vertex %ld is not split, using its own value %ld", NETID, vid_op, val_op);
+            }
+            double deg = deg_op;
+            out_value = val_op / deg;
+            
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][kv_map] Vertex %ld is not split, degree=%ld graph_ptr=0x%lx val=%lf out_value=%lf", NETID, vid_op, deg_op, neighbors_op, val_op, out_value);
+            }
+
+            long evw = evw_update_event(CEVNT, push_update);
+            send_event(evw, vid, out_value, CEVNT);
+            yield;
+        }
+
+    }
+
+    event sibling_rd_return(long deg_sibling, long vid_sibling, long* neighbors_sibling, long orig_vid, long split_start_sibling, long split_bound_sibling, double val_sibling, long gv_bin, long* vertex_addr) {
+
+        if (sibling_ptr < split_bound_sibling) {
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][sibling_rd_return] Continuing to read sibling vertex %ld", NETID, sibling_ptr);
+            }
+            send_dram_read(sibling_addr, VERTEX_STRUCT_SIZE, CEVNT);
+            sibling_ptr = sibling_ptr + 1;
+            sibling_addr = sibling_addr + VERTEX_STRUCT_BSIZE;
+        }
+
+        out_value = out_value + val_sibling;
+        orig_degree = orig_degree + deg_sibling;
+
+        num_processed = num_processed + 1;
+        long num_siblings = split_bound_sibling - split_start_sibling;
+
+        if (DEBUG_FLAG) {
+            print("[DEBUG][NWID %d][sibling_rd_return] Sibling Vertex %ld degree=%ld addr=0x%lx val=%ld", NETID, vid_sibling, deg_sibling, neighbors_sibling, val_sibling);
+            print("[DEBUG][NWID %d][sibling_rd_return] Sibling Vertex %ld num_processed=%ld num_siblings=%ld", NETID, vid_sibling, num_processed, num_siblings);
+        }
+
+        if (num_processed == num_siblings) {
+            double deg = orig_degree;
+            out_value = out_value / deg;
+            if (DEBUG_FLAG) {
+                print("[DEBUG][NWID %d][sibling_rd_return] Sibling read completed for vertex %ld, num_siblings=%ld", NETID, vid_sibling, num_siblings);
+            }
+            long evw = evw_update_event(CEVNT, push_update);
+            send_event(evw, vid, out_value, CEVNT);
+        }
+        yield;
+    }
+
+    event push_update(long vid_op, double out_value_op) {
+        if (DEBUG_FLAG) {
+            print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu, start reading nlist from 0x%lx", NETID, vid, out_value_op, nlist_ptr);
+        }
+        num_processed = 0;
+        emit_evw = evw_new(NETID, splitPageRankMS::kv_map_emit);
+
+        long evw = evw_update_event(CEVNT, rd_nlist_return);
+        
+        while (nlist_ptr < nlist_bound) {
+            send_dram_read(nlist_ptr, DRAM_MSG_SIZE, evw);
+            nlist_ptr = nlist_ptr + DRAM_MSG_BSIZE;
+        }
+    }
+
+    event rd_nlist_return(long e0, long e1, long e2, long e3, long e4, long e5, long e6, long e7, long* curr_nlist_addr) {
+        if (DEBUG_FLAG) {
+            print("Map task on vertex %ld receieve nlist starting from 0x%lx, num_processed_edges=%ld", vid, curr_nlist_addr, num_processed);
+        }
+
+        // if(e0 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e1 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e2 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e3 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e4 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e5 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e6 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+        // if(e7 == 57){
+        //     print("[DEBUG][NWID %d][push_update] Vertex %ld start to push value updated to %lu", NETID, vid, out_value);
+        // }
+
+        long* tmp_nlist_ptr = curr_nlist_addr;
+
+        send_event(emit_evw, e0, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+
+        send_event(emit_evw, e1, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+        
+
+        send_event(emit_evw, e2, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+
+        send_event(emit_evw, e3, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+
+        send_event(emit_evw, e4, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+
+        send_event(emit_evw, e5, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+
+        send_event(emit_evw, e6, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+        tmp_nlist_ptr = tmp_nlist_ptr + DRAM_MSG_SIZE;
+        if (tmp_nlist_ptr >= nlist_bound) {
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+            }
+            yield;
+        }
+
+        send_event(emit_evw, e7, out_value, IGNRCONT);
+        num_processed = num_processed + 1;
+        if (num_processed == degree) {
+            long evw = evw_update_event(CEVNT, splitPageRankMS::kv_map_return);
+            send_event(evw, vid, CEVNT);
+            if (DEBUG_FLAG) {
+                print("Map task on vertex %ld finished, num_processed=%ld", vid, num_processed);
+            }
+            yield;
+        }
+
+        if (DEBUG_FLAG) {
+            print("Map task on vertex %ld processed nlist starting from 0x%lx, num_processed_edges=%ld", vid, tmp_nlist_ptr, num_processed);
+        }
+        yield;
+
+    }
+}
+
+thread InitUpDown {
+    long* local tmp_lm_ptr;
+
+    event init(long unsigned*partition_array, long NUM_PARTITION_PER_LANE, long num_lanes, long unsigned *vertices, long num_vertices, long unsigned* values, long num_values) {
+
+        print("Top parameters: partition_array=0x%lX, num_lanes=%ld, vertices=0x%lX, values=0x%lX", partition_array, num_lanes, vertices, values);
+
+        long unsigned* local send_buffer = LMBASE + SEND_BUFFER_OFFSET;
+        send_buffer[0] = partition_array;
+        send_buffer[1] = NUM_PARTITION_PER_LANE;
+        send_buffer[2] = num_lanes;
+
+        tmp_lm_ptr = LMBASE + INPUT_KVSET_METADATA_OFFSET;
+        tmp_lm_ptr[0] = vertices;
+        tmp_lm_ptr[1] = num_vertices;
+        send_buffer[3] = tmp_lm_ptr;
+
+        tmp_lm_ptr = LMBASE + OUTPUT_METADATA_OFFSET;
+        tmp_lm_ptr[0] = values;
+        tmp_lm_ptr[1] = num_values;
+        send_buffer[4] = tmp_lm_ptr;
+        
+        long evw = evw_new(NETID, splitPageRankMS::map_shuffle_reduce);
+        send_event(evw, send_buffer, 5, terminate);
+
+        tmp_lm_ptr = LMBASE + TOP_SYNC_OFFSET;
+        *tmp_lm_ptr = 0;
+    }
+
+    event terminate() {
+        print("PageRank Map Shuffle Reduce returned. Finish updown execution and return to top.");
+        *tmp_lm_ptr = 1;
+        yield_terminate;
+    }
+}

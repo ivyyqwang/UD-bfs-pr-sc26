@@ -1,4 +1,4 @@
-# Push-BFS Readme
+# Push-PR Readme
 
 ### Generate input graph
 
@@ -29,19 +29,19 @@ eg:
 ```
 cd preprocess/
 make
-./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_bfs.txt 4096 1024
+./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_pr.txt 4096 512
 ```
 
 
 ### Run
 ```bash
 cd install/updown/apps/
-./bfs_udweave  <graph_file_gv.bin> <graph_file_nl.bin> <num_lanes> <num_control_lanes_per_level> <root_vid>  (<network_latency> <network_bandwidth>)
+./pr_udweave <graph_file_gv.bin> <graph_file_nl.bin> <num_nodes>  (<network_latency> <network_bandwidth>)
 ```
 
 eg: 
 ```
 cd install/updown/apps/
-./bfs_udweave ../../../apps/push_bfs/preprocess/RMAT_s12_bfs.txt_gv.bin  ../../../apps/push_bfs/preprocess/RMAT_s12_bfs.txt_nl.bin 2048 32 0
+./pr_udweave ../../../apps/push_pr/preprocess/RMAT_s12_pr.txt_gv.bin  ../../../apps/push_pr/preprocess/RMAT_s12_pr.txt_nl.bin 1
 ```
 
