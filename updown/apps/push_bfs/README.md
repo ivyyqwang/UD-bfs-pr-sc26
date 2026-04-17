@@ -1,4 +1,4 @@
-# K-Truss Readme
+# Push-BFS Readme
 
 ### Generate input graph
 
