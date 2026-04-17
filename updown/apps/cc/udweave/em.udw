@@ -1,0 +1,80 @@
+#include "LMStaticMap.udwh"
+
+extern event DRAMalloc::dramalloc();
+
+// A macro which declares a local pointer and writes a 1 to the address
+// LMBASE + TOP_FLAG_OFFSET indicating to the TOP core, that we completed
+// UpDown program execution.
+#define EXIT                                                                   \
+  unsigned long *local spPtrExit = LMBASE;                                     \
+  spPtrExit[TOP_FLAG_OFFSET] = 1
+
+#define args_scratch_space (LMBASE + (HEAP_OFFSET + 64))
+
+#define FAKE_SPREAD_LANES(lane) ((lane) << 5)
+#define FAKE_COMBINE_LANES(lane) ((lane) >> 5)
+
+// #define FAKE_SPREAD_LANES(lane) (lane)
+// #define FAKE_COMBINE_LANES(lane) (lane)
+
+#define vertex_size (8 * sizeof(long))
+
+#define UNSIGNED_LONG_MAX 0xFFFFFFFFFFFFFFFF
+#define SIGNED_LONG_MAX 0x7FFFFFFFFFFFFFFF
+
+// TODO(wheatman) optimize
+#define MAX_OUTSTANDING_READ_REQUESTS 10
+
+// TODO(wheatman) optimize
+#define SWITCH_TO_SPLIT_2 2048
+
+// #define ENABLE_SEND_TO_SHORTEST 1
+
+#define ENABLE_ASSERTS 1
+
+#if ENABLE_ASSERTS == 1
+#define ASSERT_UDW_NON_ZERO(value)                                             \
+  if ((value) == 0) {                                                          \
+    print(#value " had a value of zero, required nonzero");                    \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_EQUAL(v1, v2)                                               \
+  if ((v1) != (v2)) {                                                          \
+    print(#v1 " did not equal " #v2);                                          \
+    print(#v1 " = %d, " #v2 " = %d", v1, v2);                                  \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_ZERO(value)                                                 \
+  if ((value) != 0) {                                                          \
+    print(#value " did not had a value of zero, required zero");               \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#define ASSERT_UDW_NON_NEGATIVE(value)                                         \
+  if ((value) < 0) {                                                           \
+    print(#value " had a value of %d, required non negative", value);          \
+    asm {"divi X16 X16 0"}                                                     \
+    ;                                                                          \
+  }
+#else
+#define ASSERT_UDW_NON_ZERO(value)                                             \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_EQUAL(v1, v2)                                               \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_ZERO(value)                                                 \
+  if (1) {                                                                     \
+  }
+#define ASSERT_UDW_NON_NEGATIVE(value)                                         \
+  if (1) {                                                                     \
+  }
+#endif
+
+// WARNING WARNING WARNING these files need to stay in this order since they
+// share and reuse some macros
+#include "algorithms/bfs.udw"
+#include "algorithms/cc.udw"
+#include "algorithms/pr.udw"
