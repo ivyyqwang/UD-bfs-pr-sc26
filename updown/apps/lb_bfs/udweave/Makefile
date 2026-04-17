@@ -1,5 +1,5 @@
 
-UPDOWN_ROOT=../../
+UPDOWN_ROOT=../../../
 
 
 DRAM_ALLOC_BLOCKSIZE=4096

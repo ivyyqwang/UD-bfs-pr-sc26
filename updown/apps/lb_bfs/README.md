@@ -1,4 +1,4 @@
-# Connected Component Readme
+# Load-Balacing BFS Readme
 
 ### Generate input graph
 
@@ -29,7 +29,7 @@ eg:
 ```
 cd preprocess/
 make
-./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_cc.adj
+./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_lbbfs.adj
 ```
 
 
@@ -37,13 +37,13 @@ make
 ```bash
 cd udweave/
 make
-./em <graph file> CC <number of lanes>
+./LBBFS <graph file> <number of lanes> <root vid>
 ```
 
 eg: 
 ```
 cd udweave/
 make
-./em ../preprocess/RMAT_s12_cc.adj CC 2048
+./LBBFS ../preprocess/RMAT_s12_lbbfs.adj 2048 0
 ```
 
