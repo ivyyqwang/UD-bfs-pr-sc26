@@ -1,6 +1,6 @@
 from linker.EFAProgram import efaProgram
 
-## UDWeave version: 02d7c60 (2026-01-27)
+## UDWeave version: e896d87 (2026-04-17)
 
 ## Global constants
 
@@ -241,7 +241,7 @@ def EFA_intersection_launchers(efa):
 
   tranintersection_launcher__intersection_term.writeAction(f"__entry: subi X17 X17 1") 
   tranintersection_launcher__intersection_term.writeAction(f"evi X2 X23 master_launcher__reduce_num_int 1") 
-  tranintersection_launcher__intersection_term.writeAction(f"addi X8 X24 0")  # This is for casting. May be used later on
+  tranintersection_launcher__intersection_term.writeAction(f"addi X8 X24 0") 
   tranintersection_launcher__intersection_term.writeAction(f"ev X23 X25 X24 X24 8") 
   tranintersection_launcher__intersection_term.writeAction(f"movir X23 0") 
   tranintersection_launcher__intersection_term.writeAction(f"evlb X23 master_launcher__send_to_master_thread1") 
@@ -287,7 +287,6 @@ def EFA_intersection_launchers(efa):
   tranintersection_launcher__intersection_term.writeAction(f"movir X25 65504") 
   tranintersection_launcher__intersection_term.writeAction(f"add X7 X25 X23") 
   tranintersection_launcher__intersection_term.writeAction(f"movlr 0(X23) X25 0 8") 
-  tranintersection_launcher__intersection_term.writeAction(f"addi X25 X25 0")  # This is for casting. May be used later on
   tranintersection_launcher__intersection_term.writeAction(f"evi X2 X24 master_launcher__relaunch 1") 
   tranintersection_launcher__intersection_term.writeAction(f"ev X24 X24 X25 X25 4") 
   tranintersection_launcher__intersection_term.writeAction(f"movir X26 -1") 
@@ -321,7 +320,6 @@ def EFA_intersection_launchers(efa):
   tranintersection_launcher__send_to_worker_thread2.writeAction(f"__entry: movir X23 65512") 
   tranintersection_launcher__send_to_worker_thread2.writeAction(f"add X7 X23 X23") 
   tranintersection_launcher__send_to_worker_thread2.writeAction(f"movlr 0(X23) X23 0 8") 
-  tranintersection_launcher__send_to_worker_thread2.writeAction(f"addi X23 X23 0")  # This is for casting. May be used later on
   tranintersection_launcher__send_to_worker_thread2.writeAction(f"ev X8 X23 X23 X23 4") 
   tranintersection_launcher__send_to_worker_thread2.writeAction(f"sendr_wcont X23 X1 X9 X10") 
   tranintersection_launcher__send_to_worker_thread2.writeAction(f"yield_terminate") 
@@ -331,7 +329,6 @@ def EFA_intersection_launchers(efa):
   tranintersection_launcher__send_to_worker_thread4.writeAction(f"__entry: movir X23 65512") 
   tranintersection_launcher__send_to_worker_thread4.writeAction(f"add X7 X23 X23") 
   tranintersection_launcher__send_to_worker_thread4.writeAction(f"movlr 0(X23) X23 0 8") 
-  tranintersection_launcher__send_to_worker_thread4.writeAction(f"addi X23 X23 0")  # This is for casting. May be used later on
   tranintersection_launcher__send_to_worker_thread4.writeAction(f"evi X2 X25 intersection_launcher::receive 1") 
   tranintersection_launcher__send_to_worker_thread4.writeAction(f"ev X25 X23 X23 X23 4") 
   tranintersection_launcher__send_to_worker_thread4.writeAction(f"ev X23 X23 X0 X0 8") 

@@ -1,6 +1,6 @@
 from linker.EFAProgram import efaProgram
 
-## UDWeave version: 02d7c60 (2026-01-27)
+## UDWeave version: e896d87 (2026-04-17)
 
 ## Global constants
 
@@ -250,7 +250,6 @@ def EFA_master_launchers(efa):
   tranmaster_launcher__send_to_master_thread1.writeAction(f"__entry: movir X20 65504") 
   tranmaster_launcher__send_to_master_thread1.writeAction(f"add X7 X20 X20") 
   tranmaster_launcher__send_to_master_thread1.writeAction(f"movlr 0(X20) X20 0 8") 
-  tranmaster_launcher__send_to_master_thread1.writeAction(f"addi X20 X20 0")  # This is for casting. May be used later on
   tranmaster_launcher__send_to_master_thread1.writeAction(f"ev X8 X20 X20 X20 4") 
   tranmaster_launcher__send_to_master_thread1.writeAction(f"sendr_wcont X20 X1 X9 X9") 
   tranmaster_launcher__send_to_master_thread1.writeAction(f"yield_terminate") 

@@ -1,6 +1,6 @@
 from linker.EFAProgram import efaProgram
 
-## UDWeave version: 02d7c60 (2026-01-27)
+## UDWeave version: e896d87 (2026-04-17)
 
 ## Global constants
 
@@ -45,7 +45,6 @@ def EFA_v1v2intersection(efa):
   tranv1v2intersection__launch.writeAction(f"sri X2 X24 24") 
   tranv1v2intersection__launch.writeAction(f"andi X24 X24 255") 
   tranv1v2intersection__launch.writeAction(f"muli X24 X24 240") 
-  tranv1v2intersection__launch.writeAction(f"addi X24 X24 0")  # This is for casting. May be used later on
   tranv1v2intersection__launch.writeAction(f"add X24 X23 X24") 
   tranv1v2intersection__launch.writeAction(f"add X7 X24 X19") 
   ## lmbuff[TC] = 0;
@@ -292,10 +291,10 @@ def EFA_v1v2intersection(efa):
 
   ## lmbuff[TOP_FLAG_OFFSET] = 1;
 
-  tranv1v2intersection__intersect_ab.writeAction(f"movlr 216(X19) X29 0 8") 
-  tranv1v2intersection__intersect_ab.writeAction(f"movir X28 -1") 
-  tranv1v2intersection__intersect_ab.writeAction(f"sri X28 X28 1") 
-  tranv1v2intersection__intersect_ab.writeAction(f"sendr_wcont X27 X28 X29 X22") 
+  tranv1v2intersection__intersect_ab.writeAction(f"movlr 216(X19) X28 0 8") 
+  tranv1v2intersection__intersect_ab.writeAction(f"movir X29 -1") 
+  tranv1v2intersection__intersect_ab.writeAction(f"sri X29 X29 1") 
+  tranv1v2intersection__intersect_ab.writeAction(f"sendr_wcont X27 X29 X28 X22") 
   tranv1v2intersection__intersect_ab.writeAction(f"yield_terminate") 
   ## one or both the lists exited --> whichever did fetch that
 
@@ -310,11 +309,11 @@ def EFA_v1v2intersection(efa):
   tranv1v2intersection__intersect_ab.writeAction(f"movlr 16(X19) X25 0 8") 
   tranv1v2intersection__intersect_ab.writeAction(f"add X25 X24 X25") 
   tranv1v2intersection__intersect_ab.writeAction(f"bgt X27 X25 __if_intersect_ab_26_post") 
-  tranv1v2intersection__intersect_ab.writeAction(f"__if_intersect_ab_27_true: movlr 8(X19) X29 0 8") 
+  tranv1v2intersection__intersect_ab.writeAction(f"__if_intersect_ab_27_true: movlr 8(X19) X28 0 8") 
   tranv1v2intersection__intersect_ab.writeAction(f"movlr 216(X19) X27 0 8") 
-  tranv1v2intersection__intersect_ab.writeAction(f"movir X28 -1") 
-  tranv1v2intersection__intersect_ab.writeAction(f"sri X28 X28 1") 
-  tranv1v2intersection__intersect_ab.writeAction(f"sendr_wcont X29 X28 X27 X22") 
+  tranv1v2intersection__intersect_ab.writeAction(f"movir X29 -1") 
+  tranv1v2intersection__intersect_ab.writeAction(f"sri X29 X29 1") 
+  tranv1v2intersection__intersect_ab.writeAction(f"sendr_wcont X28 X29 X27 X22") 
   ## lmbuff = LMBASE;
 
   ## iter_a = 1;
@@ -327,11 +326,11 @@ def EFA_v1v2intersection(efa):
   tranv1v2intersection__intersect_ab.writeAction(f"movlr 56(X19) X27 0 8") 
   tranv1v2intersection__intersect_ab.writeAction(f"add X26 X23 X26") 
   tranv1v2intersection__intersect_ab.writeAction(f"bgt X27 X26 __if_intersect_ab_32_post") 
-  tranv1v2intersection__intersect_ab.writeAction(f"__if_intersect_ab_33_true: movlr 8(X19) X29 0 8") 
+  tranv1v2intersection__intersect_ab.writeAction(f"__if_intersect_ab_33_true: movlr 8(X19) X28 0 8") 
   tranv1v2intersection__intersect_ab.writeAction(f"movlr 216(X19) X27 0 8") 
-  tranv1v2intersection__intersect_ab.writeAction(f"movir X28 -1") 
-  tranv1v2intersection__intersect_ab.writeAction(f"sri X28 X28 1") 
-  tranv1v2intersection__intersect_ab.writeAction(f"sendr_wcont X29 X28 X27 X22") 
+  tranv1v2intersection__intersect_ab.writeAction(f"movir X29 -1") 
+  tranv1v2intersection__intersect_ab.writeAction(f"sri X29 X29 1") 
+  tranv1v2intersection__intersect_ab.writeAction(f"sendr_wcont X28 X29 X27 X22") 
   ## lmbuff = LMBASE;
 
   ## iter_a = 1;

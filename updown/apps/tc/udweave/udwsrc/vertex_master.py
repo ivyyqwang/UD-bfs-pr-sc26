@@ -1,6 +1,6 @@
 from linker.EFAProgram import efaProgram
 
-## UDWeave version: 02d7c60 (2026-01-27)
+## UDWeave version: e896d87 (2026-04-17)
 
 ## Global constants
 
@@ -119,8 +119,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_return.writeAction(f"movir X25 0") 
   tranvertex_master__v1_return.writeAction(f"hash X24 X25") 
   tranvertex_master__v1_return.writeAction(f"hash X16 X25") 
-  tranvertex_master__v1_return.writeAction(f"addi X23 X26 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_return.writeAction(f"and X25 X26 X25") 
+  tranvertex_master__v1_return.writeAction(f"and X25 X23 X25") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_return.writeAction(f"movir X26 0") 
@@ -140,10 +139,10 @@ def EFA_vertex_master(efa):
   ## Vertex needs to be counted
 
   tranvertex_master__v1_return.writeAction(f"__if_v1_return_5_post: addi X10 X22 0") 
-  tranvertex_master__v1_return.writeAction(f"sli X8 X24 3") 
-  tranvertex_master__v1_return.writeAction(f"add X10 X24 X19") 
+  tranvertex_master__v1_return.writeAction(f"sli X8 X23 3") 
+  tranvertex_master__v1_return.writeAction(f"add X10 X23 X19") 
   tranvertex_master__v1_return.writeAction(f"__while_v1_return_9_condition: bleu X19 X22 __while_v1_return_11_post") 
-  tranvertex_master__v1_return.writeAction(f"__while_v1_return_10_body: send_dmlm_ld_wret X22 vertex_master::v1_neighs 8 X24") 
+  tranvertex_master__v1_return.writeAction(f"__while_v1_return_10_body: send_dmlm_ld_wret X22 vertex_master::v1_neighs 8 X23") 
   tranvertex_master__v1_return.writeAction(f"addi X18 X18 1") 
   tranvertex_master__v1_return.writeAction(f"addi X22 X22 64") 
   tranvertex_master__v1_return.writeAction(f"jmp __while_v1_return_9_condition") 
@@ -154,11 +153,11 @@ def EFA_vertex_master(efa):
   ## Update the return count
 
   tranvertex_master__v1_neighs.writeAction(f"__entry: movlr 144(X20) X22 0 8") 
-  tranvertex_master__v1_neighs.writeAction(f"movlr 152(X20) X24 0 8") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X3 X23 0") 
+  tranvertex_master__v1_neighs.writeAction(f"movlr 152(X20) X23 0 8") 
+  tranvertex_master__v1_neighs.writeAction(f"addi X3 X24 0") 
   tranvertex_master__v1_neighs.writeAction(f"movrl X16 0(X21) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"movrl X0 24(X21) 0 8") 
-  tranvertex_master__v1_neighs.writeAction(f"bleu X19 X23 __if_v1_neighs_1_false") 
+  tranvertex_master__v1_neighs.writeAction(f"bleu X19 X24 __if_v1_neighs_1_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_0_true: addi X8 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_4_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_3_true: addi X22 X22 1") 
@@ -167,8 +166,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X25") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X25") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X27 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X25 X27 X25") 
+  tranvertex_master__v1_neighs.writeAction(f"and X25 X23 X25") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
@@ -195,7 +193,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X27 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_8_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_5_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_5_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_2_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_1_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -205,7 +203,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_11_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_2_post: bleu X19 X23 __if_v1_neighs_13_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_2_post: bleu X19 X24 __if_v1_neighs_13_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_12_true: addi X9 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_16_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_15_true: addi X22 X22 1") 
@@ -214,8 +212,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X27") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X27") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X25 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X27 X25 X27") 
+  tranvertex_master__v1_neighs.writeAction(f"and X27 X23 X27") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
@@ -242,7 +239,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X25 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_20_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_17_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_17_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_14_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_13_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -252,7 +249,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_23_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_14_post: bleu X19 X23 __if_v1_neighs_25_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_14_post: bleu X19 X24 __if_v1_neighs_25_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_24_true: addi X10 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_28_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_27_true: addi X22 X22 1") 
@@ -261,8 +258,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X25") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X25") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X27 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X25 X27 X25") 
+  tranvertex_master__v1_neighs.writeAction(f"and X25 X23 X25") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
@@ -289,7 +285,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X27 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_32_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_29_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_29_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_26_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_25_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -299,7 +295,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_35_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_26_post: bleu X19 X23 __if_v1_neighs_37_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_26_post: bleu X19 X24 __if_v1_neighs_37_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_36_true: addi X11 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_40_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_39_true: addi X22 X22 1") 
@@ -308,8 +304,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X27") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X27") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X25 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X27 X25 X27") 
+  tranvertex_master__v1_neighs.writeAction(f"and X27 X23 X27") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
@@ -336,7 +331,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X25 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_44_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_41_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_41_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_38_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_37_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -346,7 +341,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_47_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_38_post: bleu X19 X23 __if_v1_neighs_49_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_38_post: bleu X19 X24 __if_v1_neighs_49_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_48_true: addi X12 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_52_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_51_true: addi X22 X22 1") 
@@ -355,8 +350,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X25") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X25") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X27 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X25 X27 X25") 
+  tranvertex_master__v1_neighs.writeAction(f"and X25 X23 X25") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
@@ -383,7 +377,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X27 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_56_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_53_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_53_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_50_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_49_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -393,7 +387,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_59_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_50_post: bleu X19 X23 __if_v1_neighs_61_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_50_post: bleu X19 X24 __if_v1_neighs_61_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_60_true: addi X13 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_64_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_63_true: addi X22 X22 1") 
@@ -402,8 +396,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X27") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X27") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X25 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X27 X25 X27") 
+  tranvertex_master__v1_neighs.writeAction(f"and X27 X23 X27") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
@@ -430,7 +423,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X25 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_68_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_65_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_65_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_62_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_61_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -440,7 +433,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_71_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_62_post: bleu X19 X23 __if_v1_neighs_73_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_62_post: bleu X19 X24 __if_v1_neighs_73_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_72_true: addi X14 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_76_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_75_true: addi X22 X22 1") 
@@ -449,8 +442,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X25") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X25") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X27 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X25 X27 X25") 
+  tranvertex_master__v1_neighs.writeAction(f"and X25 X23 X25") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
@@ -477,7 +469,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X27 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_80_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_77_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_77_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_74_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_73_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 
@@ -487,7 +479,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X26 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_83_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_74_post: bleu X19 X23 __if_v1_neighs_85_false") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_74_post: bleu X19 X24 __if_v1_neighs_85_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_84_true: addi X15 X26 0") 
   tranvertex_master__v1_neighs.writeAction(f"ble X16 X26 __if_v1_neighs_88_false") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_87_true: addi X22 X22 1") 
@@ -496,8 +488,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"movir X27 0") 
   tranvertex_master__v1_neighs.writeAction(f"hash X26 X27") 
   tranvertex_master__v1_neighs.writeAction(f"hash X16 X27") 
-  tranvertex_master__v1_neighs.writeAction(f"addi X24 X25 0")  # This is for casting. May be used later on
-  tranvertex_master__v1_neighs.writeAction(f"and X27 X25 X27") 
+  tranvertex_master__v1_neighs.writeAction(f"and X27 X23 X27") 
   ## next_nwid = next_nwid % total_lanes
 
   tranvertex_master__v1_neighs.writeAction(f"movir X25 0") 
@@ -524,7 +515,7 @@ def EFA_vertex_master(efa):
   tranvertex_master__v1_neighs.writeAction(f"sendr_wcont X17 X25 X18 X18") 
   tranvertex_master__v1_neighs.writeAction(f"yield_terminate") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_92_post: yield") 
-  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_89_post: addi X23 X23 8") 
+  tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_89_post: addi X24 X24 8") 
   tranvertex_master__v1_neighs.writeAction(f"jmp __if_v1_neighs_86_post") 
   tranvertex_master__v1_neighs.writeAction(f"__if_v1_neighs_85_false: movrl X22 144(X20) 0 8") 
   tranvertex_master__v1_neighs.writeAction(f"subi X18 X18 1") 

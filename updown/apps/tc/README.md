@@ -42,6 +42,6 @@ cd install/updown/apps/
 eg: 
 ```
 cd install/updown/apps/
-./tc_udweave ./tc_udweave ../../../apps/tc/preprocess/RMAT_s12_tc.txt_gv.bin   ../../../apps/tc/preprocess/RMAT_s12_tc.txt_nl.bin 2048
+./tc_udweave ../../../apps/tc/preprocess/RMAT_s12_tc.txt_gv.bin   ../../../apps/tc/preprocess/RMAT_s12_tc.txt_nl.bin 2048
 ```
 
