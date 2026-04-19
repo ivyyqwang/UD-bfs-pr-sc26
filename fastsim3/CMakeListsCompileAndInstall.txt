@@ -1,0 +1,192 @@
+
+
+function (compileUDW UPDOWNSIMRT_PYTHON_APPS_SRC2BIN DEP_FILES)
+
+    set(CUSTOM_MAKEFILE "${CMAKE_CURRENT_SOURCE_DIR}/Makefile.udw.mk")
+
+    if (NOT EXISTS "${CUSTOM_MAKEFILE}")
+        message(FATAL_ERROR "Required file not found: ${CUSTOM_MAKEFILE}")
+    endif()
+
+    get_filename_component(FULL_OUTPUT_PATH_PY "${CMAKE_CURRENT_BINARY_DIR}/${UPDOWNSIMRT_PYTHON_APPS_SRC2BIN}" ABSOLUTE)
+    string(REGEX REPLACE "[.]py$" ".hpp" FULL_OUTPUT_PATH_HPP ${FULL_OUTPUT_PATH_PY})
+
+    message(DEBUG 
+        "OUTPUT ${FULL_OUTPUT_PATH_PY} ${FULL_OUTPUT_PATH_HPP}
+        COMMAND ${CMAKE_MAKE_PROGRAM} -f ${CUSTOM_MAKEFILE} UPDOWN_SRC_DIR=${CMAKE_SOURCE_DIR} UPDOWN_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR} PYTHON=${Python3_EXECUTABLE} UDWEAVE=${UDWEAVE} LINKER=${LINKER}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        DEPENDS ${DEP_FILES}"
+    )
+
+    add_custom_command(
+        OUTPUT ${FULL_OUTPUT_PATH_PY} ${FULL_OUTPUT_PATH_HPP}
+        COMMAND ${CMAKE_MAKE_PROGRAM} -f ${CUSTOM_MAKEFILE} UPDOWN_SRC_DIR=${CMAKE_SOURCE_DIR} UPDOWN_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR} PYTHON=${Python3_EXECUTABLE} UDWEAVE=${UDWEAVE} LINKER=${LINKER}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        DEPENDS ${DEP_FILES}
+        COMMENT "Generating EFA files: ${UPDOWNSIMRT_PYTHON_APPS_SRC2BIN}"
+    )
+    add_custom_target("EXT_MAKE_${APP_NAME}" DEPENDS ${FULL_OUTPUT_PATH_PY} ${FULL_OUTPUT_PATH_HPP})
+endfunction()
+
+
+# Create Updown EFA binaries
+function (compilePythonEFA UPDOWNSIMRT_PYTHON_APPS_SRC2BIN DEP_FILES)
+    if(${UPDOWN_ENABLE_BASIM})
+      set(assem_prog "efa2bin.py")
+
+      foreach(PYFILE IN LISTS UPDOWNSIMRT_PYTHON_APPS_SRC2BIN)
+        string(REGEX REPLACE "[.]py$" ".bin" PYBIN ${PYFILE})
+        get_filename_component(PYBINFILE ${PYBIN} NAME)
+        get_filename_component(PYBINPATH ${PYBIN} PATH)
+
+        # if there are no UDW files, take the normal SRC2BIN and compile it
+        if(DEP_FILES STREQUAL "")
+            get_filename_component(PYFILEPATH ${PYFILE} REALPATH)
+            set(DEPENDS "${PYFILEPATH}")
+        else()
+            # If there are UDW files, then the custom makefile should have written something into the build directory. 
+            # Assemble this and do not expect the EFA.py file in the app directory.
+            set(PYFILEPATH "${CMAKE_CURRENT_BINARY_DIR}/${PYFILE}")
+            set(DEPENDS "EXT_MAKE_${APP_NAME}")
+        endif()
+
+        message(DEBUG "OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${PYBIN}
+            COMMAND ${Python3_EXECUTABLE} ${assem_prog}
+            ARGS --efa ${PYFILEPATH} --outpath ${CMAKE_CURRENT_BINARY_DIR}/${PYBINPATH} --toplinker
+            WORKING_DIRECTORY ${UPDOWN_ASSEMBLER}
+            DEPENDS ${DEPENDS}
+        ")
+
+        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${PYBINPATH}/${PYBINFILE}
+          COMMAND ${Python3_EXECUTABLE} ${assem_prog}
+          ARGS --efa ${PYFILEPATH} --outpath ${CMAKE_CURRENT_BINARY_DIR}/${PYBINPATH} --toplinker
+          WORKING_DIRECTORY ${UPDOWN_ASSEMBLER}
+          DEPENDS ${DEPENDS})
+        list(APPEND UPDOWNSIMRT_PYTHON_APPS_BIN ${CMAKE_CURRENT_BINARY_DIR}/${PYBINPATH}/${PYBINFILE})
+      endforeach()
+      add_custom_target("EFA_${APP_NAME}" ALL DEPENDS ${UPDOWNSIMRT_PYTHON_APPS_BIN})
+      add_dependencies("EFA_${APP_NAME}" libraries)
+    endif()
+    INSTALL(FILES ${UPDOWNSIMRT_PYTHON_APPS_BIN} DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH})
+endfunction()
+
+
+function (compileTOP UPDOWNSIMRT_APPS_SRC)
+    if (DEFINED CMAKE_GEM5_BASE)
+        list(APPEND CMAKE_MODULE_PATH "../../../include")
+        cmake_print_variables(GEM5_BASE_DIR)
+        include_directories(${GEM5_BASE_DIR}/include/)
+        link_directories(${GEM5_BASE_DIR}/util/m5/build/x86/out)
+        set(DEPS UDLibs UpDownBASimRuntimeStatic UpDownSimRuntimeStatic m rt m5)
+    else ()
+        set(DEPS UDLibs UpDownBASimRuntimeStatic UpDownSimRuntimeStatic m)
+    endif ()
+
+    #link_directories(../libraries/dramalloc)
+
+    foreach (APPS_SRC ${UPDOWNSIMRT_APPS_SRC})
+
+        if(APP_NAME IN_LIST APPS_WITH_LIBCONFIG AND NOT ENABLE_LIBCONFIG)
+            message(STATUS "Skipping ${APP_NAME} because it requires libconfig++ and ENABLE_LIBCONFIG is OFF")
+            continue()
+        endif()
+
+        get_filename_component(BARENAME ${APPS_SRC} NAME)
+        string(REGEX REPLACE "[.]cpp$" "" BARENAME ${BARENAME})
+
+        add_executable(${BARENAME} ${APPS_SRC} ${CMAKE_SOURCE_DIR}/apps/common/snap-core/Snap.o)
+
+        # If a custom Makefile is to be used, then this make file probably also generates the header files. I assume
+        # that the header file is included in the TOP proggram. That is why, we need to create a dependency so that
+        # the custom Makefile is executed *first*, before the TOP CPP file is compiled.
+        if(NOT DEP_FILES STREQUAL "")
+            add_dependencies(${BARENAME} "EXT_MAKE_${APP_NAME}")
+            get_filename_component(FULL_OUTPUT_PATH_PY "${CMAKE_CURRENT_BINARY_DIR}/${UPDOWNSIMRT_PYTHON_APPS_SRC2BIN}" ABSOLUTE)
+            string(REGEX REPLACE "[.]py$" ".hpp" FULL_OUTPUT_PATH_HPP ${FULL_OUTPUT_PATH_PY})
+            set_source_files_properties(${APPS_SRC} PROPERTIES OBJECT_DEPENDS "${FULL_OUTPUT_PATH_HPP}")
+        endif()
+
+        
+        # making sure that we find the generated .hpp file by the UpDown assembler in the build directory
+        target_include_directories(${BARENAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+        target_include_directories(${BARENAME} PRIVATE ${CMAKE_SOURCE_DIR}/libraries/LMStaticMaps/)
+
+        if (APP_NAME IN_LIST APPS_WITH_LIBCONFIG)
+            target_link_libraries(${BARENAME} ${DEPS} config++)
+        else ()
+            target_link_libraries(${BARENAME} ${DEPS})
+        endif ()
+
+        # string(CONCAT APP_NAME_DYNAMIC "${BARENAME}" "_dynamic")
+        # string(CONCAT APP_NAME_STATIC "${BARENAME}" "_static")
+        # add_library(${APP_NAME_DYNAMIC} SHARED ${APPS_SRC})
+        # add_library(${APP_NAME_STATIC} STATIC ${APPS_SRC})
+        # INSTALL(TARGETS ${APP_NAME_DYNAMIC}
+        #     LIBRARY DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+        #     ARCHIVE DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+        #     )
+
+        # INSTALL(TARGETS ${APP_NAME_STATIC}
+        #     LIBRARY DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+        #     ARCHIVE DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+        #     )
+
+        INSTALL(TARGETS ${BARENAME}
+            RUNTIME DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+            )
+    endforeach()
+endfunction()
+
+
+# function to compile and install UpDown programs
+function (compileAndInstall UPDOWNSIMRT_APPS_SRC UPDOWNSIMRT_PYTHON_APPS_SRC UPDOWNSIMRT_PYTHON_APPS_SRC2BIN)
+    
+    # UDW_SRC_FILES is optional
+    set(DEP_FILES "")
+    if(ARGN) # if an extra arg was passed, treat it as UDW_SRC_FILES
+        set(DEP_FILES "${ARGN}")
+    endif()
+
+    # message(${CMAKE_SOURCE_DIR})
+    # message(${CMAKE_BINARY_DIR})
+    # message(${CMAKE_CURRENT_SOURCE_DIR})
+    # message(${CMAKE_CURRENT_BINARY_DIR})
+    # message(${UPDOWNSIMRT_PYTHON_APPS_SRC2BIN})
+    # get_target_property(INC_DIRS config++ INCLUDE_DIRECTORIES)
+    # message(STATUS "config++ include directories: ${INC_DIRS}")
+
+    # build the installation path
+    string(REPLACE "${CMAKE_SOURCE_DIR}/" "" INSTALL_REL_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+    set(UPDOWN_RUNTIME_APPS_INSTALL_PATH "${UPDOWN_RUNTIME_INSTALL_DIR}/${INSTALL_REL_PATH}")
+    get_filename_component(APP_NAME "${CMAKE_CURRENT_BINARY_DIR}" NAME)
+    
+    if(NOT DEP_FILES STREQUAL "")
+        compileUDW("${UPDOWNSIMRT_PYTHON_APPS_SRC2BIN}" "${DEP_FILES}")
+    endif()
+    compilePythonEFA("${UPDOWNSIMRT_PYTHON_APPS_SRC2BIN}" "${DEP_FILES}")
+    compileTOP("${UPDOWNSIMRT_APPS_SRC}")
+    
+
+    INSTALL(FILES ${UPDOWNSIMRT_PYTHON_APPS_SRC} DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH})
+endfunction()
+
+
+# Copy files compilation artifacts and sources (Makefile etc.) to the install directory).
+function (copyAllFilesToInstall)
+    string(REPLACE "${CMAKE_SOURCE_DIR}/" "" INSTALL_REL_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+    set(UPDOWN_RUNTIME_APPS_INSTALL_PATH "${UPDOWN_INSTALL_DIR}/${INSTALL_REL_PATH}")
+    
+    file(GLOB HPP_FILES "${CMAKE_CURRENT_BINARY_DIR}/*.hpp")
+    INSTALL(
+        FILES ${HPP_FILES} "${CMAKE_CURRENT_BINARY_DIR}/Makefile"
+        DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+    )
+
+    INSTALL(
+        DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
+        DESTINATION ${UPDOWN_RUNTIME_APPS_INSTALL_PATH}
+        FILES_MATCHING
+        PATTERN "*"
+        PATTERN "__pycache__" EXCLUDE
+    )
+endfunction()

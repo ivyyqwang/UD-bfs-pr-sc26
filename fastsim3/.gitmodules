@@ -1,0 +1,3 @@
+[submodule "udweave"]
+	path = udweave
+	url = git@bitbucket.org:achien7242/udweave.git
