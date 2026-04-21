@@ -1,16 +1,6 @@
-# BFS Validation README
+# BFS Push-Pull README
 
-## Generate input
-
-```bash
-python3 ./RMAT.py --scale <scale> --seed <random_seed>
-```
-
-This will generate 1 file `<filename>` containing edges for an RMAT graph of scale `scale` with random seed set to `random_seed`.
-The generated graph has two to the power `scale` number of vertices.
-The output graph will be written to a file named `scale_<scale>_seed_<random_seed>_edges.txt` under the `graph` folder.
-
-The RMAT graph generated and used for validation and performance experiments are https://drive.google.com/file/d/1lU61zWGhs0oYQw3HMfrmdEOVdSZ2Gauc/view?usp=drive_link.
+## Preprocess input
 
 ```bash
 ./split_shuffle  -f <graph_file> -m <max_degree> -l (line offset) -d(directed) -s(stats) -n(no split)
