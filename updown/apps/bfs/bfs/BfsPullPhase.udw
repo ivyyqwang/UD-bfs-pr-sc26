@@ -38,7 +38,6 @@ thread BFS_pull {
     long* nlist_bound;
     long num_pending;
     long iteration;
-    // long is_active;
     
     // Vertex structure 
     // Operands:
@@ -65,8 +64,6 @@ thread BFS_pull {
                 print("[DEBUG][NWID %d][kv_map] Vertex %ld is already visited in previous iteration, return to UDKVMSR", NETID, vid_op);
             }
             long evw = evw_update_event(CEVNT, kv_map_return);
-            tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-            *tmp_lm_ptr = *tmp_lm_ptr + 0;
             send_event(evw, vid_op, CEVNT);
             yield;
         }
@@ -77,8 +74,6 @@ thread BFS_pull {
                 print("[DEBUG][NWID %d][kv_map] Vertex %ld has degree 0, return to UDKVMSR", NETID, vid_op);
             }
             long evw = evw_update_event(CEVNT, kv_map_return);
-            tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-            *tmp_lm_ptr = *tmp_lm_ptr + 0;
             send_event(evw, vid_op, CEVNT);
             yield;
         }
@@ -106,6 +101,8 @@ thread BFS_pull {
                 break;
             }
         }
+        tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
+        *tmp_lm_ptr = *tmp_lm_ptr + num_pending;
 
         parent = -1;
     }
@@ -129,10 +126,13 @@ thread BFS_pull {
             }
             yield;
         }
+        long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
+        long tmp_value = *tmp_lm_ptr;
         if (nlist_ptr < nlist_bound) {
             send_dram_read(nlist_ptr, DRAM_MSG_SIZE, CEVNT);
             num_pending = num_pending + DRAM_MSG_SIZE;
             nlist_ptr = nlist_ptr + DRAM_MSG_BSIZE;
+            tmp_value = tmp_value + DRAM_MSG_SIZE;
         }
 
         long* tmp_nlist_ptr = curr_nlist_addr;
@@ -140,6 +140,10 @@ thread BFS_pull {
 
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 8;
+            tmp_value = tmp_value - 8;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         long *tmp_vertex_addr = graph + (e0 << VERTEX_LOG2_BSIZE);
@@ -148,6 +152,10 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 7;
+            tmp_value = tmp_value - 7;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e1 << VERTEX_LOG2_BSIZE);
@@ -156,6 +164,10 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 6;
+            tmp_value = tmp_value - 6;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e2 << VERTEX_LOG2_BSIZE);
@@ -164,6 +176,10 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 5;
+            tmp_value = tmp_value - 5;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e3 << VERTEX_LOG2_BSIZE);
@@ -172,6 +188,10 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 4;
+            tmp_value = tmp_value - 4;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e4 << VERTEX_LOG2_BSIZE);
@@ -180,6 +200,10 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 3;
+            tmp_value = tmp_value - 3;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e5 << VERTEX_LOG2_BSIZE);
@@ -188,6 +212,10 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 2;
+            tmp_value = tmp_value - 2;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e6 << VERTEX_LOG2_BSIZE);
@@ -196,11 +224,19 @@ thread BFS_pull {
         tmp_nlist_ptr = tmp_nlist_ptr + WORD_SIZE;
         if (tmp_nlist_ptr >= nlist_bound) {
             num_pending = num_pending - 1;
+            tmp_value = tmp_value - 1;
+            asm {
+                "jmp break_label"
+            };
             yield;
         }
         tmp_vertex_addr = graph + (e7 << VERTEX_LOG2_BSIZE);
         send_dram_read(tmp_vertex_addr, DRAM_MSG_SIZE, read_vertex_evw);
 
+        
+        asm {
+            "break_label: movrl %[val] 0(%[sp_addr]) 0 8"
+        }: [sp_addr] "r" (tmp_lm_ptr), [val] "r" (tmp_value);
         yield;
 
     }
@@ -236,8 +272,8 @@ thread BFS_pull {
                     print("[DEBUG][NWID %d][read_vertex] No visited neighbor found for vid=%ld, return to UDKVMSR", NETID, vid);
                 }
                 long evw = evw_update_event(CEVNT, kv_map_return);
-                long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-                *tmp_lm_ptr = *tmp_lm_ptr + 0;
+                // long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
+                // *tmp_lm_ptr = *tmp_lm_ptr - ;
                 send_event(evw, vid_op, CEVNT);
                 yield;
             }
@@ -252,8 +288,8 @@ thread BFS_pull {
                 print("[DEBUG][NWID %d][read_orig_vertex] Vertex %ld is already updated to the newest distance by a sibling, return to UDKVMSR", NETID, orig_vid);
             }
             long evw = evw_update_event(CEVNT, kv_map_return);
-            long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-            *tmp_lm_ptr = *tmp_lm_ptr + 0;
+            // long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
+            // *tmp_lm_ptr = *tmp_lm_ptr + 0;
             send_event(evw, vid_op, CEVNT);
             if (DEBUG_FLAG) {
                 if (dist_op >= 0 && dist_op < iteration) {
@@ -281,11 +317,11 @@ thread BFS_pull {
             if (DEBUG_FLAG) {
                 print("[DEBUG][NWID %d][read_orig_vertex] Number of pending write operations = %ld", NETID, num_pending);
             }
-            tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-            *tmp_lm_ptr = *tmp_lm_ptr + num_siblings;
+            // tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
+            // *tmp_lm_ptr = *tmp_lm_ptr + num_siblings;
         } else {
-            long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-            *tmp_lm_ptr = *tmp_lm_ptr + num_siblings;
+            // long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
+            // *tmp_lm_ptr = *tmp_lm_ptr + num_siblings;
             long sibling_bound = sibling_vid + num_siblings;
             long evw = evw_update_event(CEVNT, update_siblings);
             send_event(evw, sibling_bound, CCONT);
@@ -370,8 +406,6 @@ thread BFS_pull {
         }
         if (num_pending == 0) {
             long evw = evw_update_event(CEVNT, kv_map_return);
-            // long* local tmp_lm_ptr = LMBASE + KVMSR_META_DATA_OFFSET;
-            // *tmp_lm_ptr = *tmp_lm_ptr + num_siblings;
             send_event(evw, orig_vid, num_siblings, CEVNT);
         }
         yield;

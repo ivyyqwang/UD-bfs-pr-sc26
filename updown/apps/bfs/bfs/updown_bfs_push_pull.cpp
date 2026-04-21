@@ -1,5 +1,5 @@
 
-#include "dramalloc.hpp"
+#include "utils.hpp"
 #include "out/push_pull_exe.hpp"
 #include <basim_stats.hh>
 #include <basimupdown.h>
@@ -8,10 +8,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <random>
 #include <sys/types.h>
 
 // #define DEBUG
-// #define VALIDATE_RESULT
+#define VALIDATE_RESULT
 
 #ifdef GEM5_MODE
 #include <gem5/m5ops.h>
@@ -21,6 +22,13 @@
 #include <fstream>
 #include <iostream>
 #endif
+
+#ifndef DRAMALLOC
+#define DRAMALLOC
+#include "dramalloc.hpp"
+#endif
+
+#define SHUFFLE_PARTITIONS
 
 #define USAGE "USAGE: ./updown_bfs_push_pull <graph_file> <num_uds> <root_vid> <partition_parameter> (<output_file>) "
 
@@ -375,7 +383,36 @@ int main(int argc, char *argv[]) {
   printf("Number of partitions per lane = %ld\t Number of partitions = %ld\t Number of vertices per partition = %ld\n", num_partition_per_lane, num_partitions,
          num_vertices_per_part);
 
+  uint64_t partitions_size = (num_partitions) * sizeof(Iterator);
   Iterator *partitions = reinterpret_cast<Iterator *>(allocator->mm_malloc_global(num_partitions * sizeof(Iterator), blockSize, machine.NumNodes, 0));
+
+#ifdef SHUFFLE_PARTITIONS  
+  Iterator *partitions_local = (Iterator *) bfs_rt->mm_malloc(num_partitions * sizeof(Iterator));
+
+  uint64_t offset = 0;
+  for (int i = 0; i < num_partitions; i++) {
+    partitions_local[i].begin = g_v_bin + offset;
+    offset = std::min((i + 1) * num_vertices_per_part, num_split_vertices);
+    partitions_local[i].end = g_v_bin + offset;
+  }
+
+  // shuffle partitions to avoid bank conflict
+  printf("Shuffle the partition array");
+  std::mt19937 g(42); // fixed seed for reproducibility
+
+  std::shuffle(partitions_local, partitions_local + num_partitions, g);
+
+#ifdef DEBUG
+  printf("After shuffling partitions_local:\n");
+  for (int i = 0; i < num_partitions; i++) {
+    printf("Partition 1 idx=%d: begin = %p, end = %p\n", i, partitions_local[i].begin, partitions_local[i].end);
+  }
+#endif
+
+  CopyLocal2Global(allocator, blockSize, (uint64_t)partitions, (uint64_t)partitions_local, partitions_size);
+
+  bfs_rt->mm_free(partitions_local);
+#else
 
   uint64_t iterator_offset = 0;
   Iterator *temp_iterator;
@@ -394,6 +431,7 @@ int main(int argc, char *argv[]) {
     printf("Partition %d: begin %p, end %p\n", i, temp_iterator->begin, temp_iterator->end);
 #endif
   }
+#endif
 
   uint64_t front_stride = (num_split_vertices / num_uds) * (sizeof(uint64_t)) * 2;
 #ifdef DEBUG
@@ -472,23 +510,23 @@ int main(int argc, char *argv[]) {
   printf("BFS done. Number of iterations = %ld.\n", num_iters);
   fflush(stdout);
 
-#ifdef FASTSIM
-  // Dump stats and histograms
-  bfs_rt->db_write_stats(0, num_uds * NUM_LANE_PER_UD, "bfs");
-#if defined(DETAIL_STATS)
-  bfs_rt->db_write_event_stats(0, num_lanes, "bfs");
-#endif
+// #ifdef FASTSIM
+//   // Dump stats and histograms
+//   bfs_rt->db_write_stats(0, num_uds * NUM_LANE_PER_UD, "bfs");
+// #if defined(DETAIL_STATS)
+//   bfs_rt->db_write_event_stats(0, num_lanes, "bfs");
+// #endif
 
-  for (int i = 0; i < num_uds; i = i + 1) {
-    for (int j = 0; j < 64; j = j + 1) {
-      bfs_rt->print_stats(i, j);
+//   for (int i = 0; i < num_uds; i = i + 1) {
+//     for (int j = 0; j < 64; j = j + 1) {
+//       bfs_rt->print_stats(i, j);
 
-#ifdef DETAIL_STATS
-      bfs_rt->print_histograms(i, j);
-#endif
-    }
-  }
-#endif
+// #ifdef DETAIL_STATS
+//       bfs_rt->print_histograms(i, j);
+// #endif
+//     }
+//   }
+// #endif
 
 #ifdef DEBUG
   printf("==========================\nRemapped vertices\n=============================\n");
