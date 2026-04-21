@@ -5,12 +5,23 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 project(UpDown C CXX)
 
-set(UPDOWN_INSTALL_DIR "updown")
+set(UPDOWN_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/updown")
 set(UPDOWN_HEADERS_INSTALL_PATH "${UPDOWN_INSTALL_DIR}/include")
 set(UPDOWN_LIB "${UPDOWN_INSTALL_DIR}/lib")
+set(UPDOWN_RUNTIME_LIBRARY_INSTALL_PATH "${UPDOWN_INSTALL_DIR}/libraries")
 set(UPDOWN_BIN "${UPDOWN_INSTALL_DIR}/bin")
 set(UPDOWN_APPS "${UPDOWN_INSTALL_DIR}/apps")
 set(UPDOWN_ASSEMBLER "${PROJECT_SOURCE_DIR}/udbasim/assembler")
+set(UDWEAVE_DIR "${PROJECT_SOURCE_DIR}/udweave")
+set(UDWEAVE "${UDWEAVE_DIR}/UDweave.py")
+set(LINKER_DIR "${PROJECT_SOURCE_DIR}/linker")
+set(LINKER "${LINKER_DIR}/EFAlinker.py")
+
+# Setting the library path the the path in the installed directory.
+# Otherwise, the compiled apps will not find the libraries copied to 
+# ${CMAKE_INSTALL_PREFIX}/updown/libs.
+set(CMAKE_INSTALL_RPATH "${UPDOWN_LIB}")
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_compile_definitions(BASE_PATH="${CMAKE_INSTALL_PREFIX}")
 
@@ -74,7 +85,7 @@ if (UPDOWN_ENABLE_DEBUG)
 else()
   set(UPDOWN_DEBUG False)
   # SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp -ggdb -O3 -fsanitize=address -fno-omit-frame-pointer -static-libasan")
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp -O3 -ggdb")
+  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp -O3")
 endif()
 
 # Enable GNU Profiler
@@ -86,27 +97,21 @@ if (DEBUG_SYMBOLS)
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp -ggdb -O3 ")
 endif ()
 
-
-if(UPDOWN_NODES EQUAL 64)
-  add_compile_definitions(NODE64=1)
-elseif(UPDOWN_NODES EQUAL 32)
-  add_compile_definitions(NODE32=1)
-elseif(UPDOWN_NODES EQUAL 8)
-  add_compile_definitions(NODE8=1)
-else()
-  set(UPDOWN_NODES 1)
-  add_compile_definitions(NODE1=1)
-endif()
-message("Building ${UPDOWN_NODES} Node Updown")
-
-
-message (STATUS "PROJ :$ENV{PROJ}")
 if (DEFINED CMAKE_GEM5_BASE)
   set(GEM5_BASE_DIR "${CMAKE_GEM5_BASE}")
 endif()
 
-find_package(PythonInterp)
-find_package(Python3)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
+# check of the Python interpreter is available. It is not mandatory, but without it UDWeave will not work
+if (NOT Python3_Interpreter_FOUND)
+    message(WARNING "Python3 interpreter not found. You will not be able to compile UpDown applications.")
+endif()
+
+# check, if the udweave repository has been checked out
+if (NOT EXISTS "${UDWEAVE}")
+    message(WARNING "'${UDWEAVE}' does not exist! You will not be able to compile UDW sources. Have you checked out the git submodule (git submodule init; git submodule update in ${UDWEAVE_DIR})?")
+endif()
 
 include_directories(BEFORE
     udbasim/common/include
@@ -125,15 +130,30 @@ if (ENABLE_SQLITE)
     add_compile_definitions(ENABLE_SQLITE=1)
 endif ()
 
+if (ENABLE_LIBCONFIG)
+    include_directories(BEFORE ext/libconfig/lib)
+endif ()
+set(APPS_WITH_LIBCONFIG "wf2k2_exactMatch")
+
 install(FILES common/include/debug.h DESTINATION ${UPDOWN_HEADERS_INSTALL_PATH})
 
-## Building runtime system
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/CMakeListsCompileAndInstall.txt)
+
+## Building runtime system
 add_subdirectory(runtime)
 add_subdirectory(simruntime)
 add_subdirectory(udbasim)
 add_subdirectory(basimruntime)
 add_subdirectory(libraries)
-add_subdirectory(apps)
-add_subdirectory(te)
+
+if (UPDOWNRT_ENABLE_APPS)
+  add_subdirectory(apps)
+endif()
+
+if (UPDOWNRT_ENABLE_TE)
+  add_subdirectory(te)
+endif()
+
 add_subdirectory(ext)
+

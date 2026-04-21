@@ -9,7 +9,7 @@ The folder structure of the respository
 ```
 ├── graph_analytics_and_modeling        # projection model.
 │   ├── julia                           # random graph generators and serial algorithms used for producing work statistics
-│   ├── python                          # plotting code for projections.
+│   ├── python                          # projection code for BFS and PR.
 │   ├── data
 │   │   ├── julia_output                # precomputed graph/algorithm statistics used for projections
 ├── gpu_scripts                         # GPU baseline programs and scripts
