@@ -48,9 +48,9 @@ thread splitPageRankMS{
             yield;
         }
 
-        if (DEBUG_FLAG) {
-            print("[DEBUG][NWID %d][kv_map] Vertex %ld (addr=0x%lx) degree=%ld nlist_ptr=0x%lx val=%ld", NETID, vid_op, vertex_addr, deg_op, neighbors_op, val_op);
-        }
+        // if (vid_op == 0) {
+        //     print("[DEBUG][NWID %d][kv_map] Vertex %ld (addr=0x%lx) degree=%ld nlist_ptr=0x%lx val=%ld", NETID, vid_op, vertex_addr, deg_op, neighbors_op, val_op);
+        // }
         vid = vid_op;
         degree = deg_op;
         sibling_ptr = split_start_op;

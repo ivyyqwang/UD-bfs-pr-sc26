@@ -7,7 +7,7 @@ from libraries.UDMapShuffleReduce.utils.IntermediateKeyValueSet import Intermedi
 from libraries.LMStaticMaps.LMStaticMap import *
 from linker.EFAProgram import EFAProgram
 
-NUM_NODES = 1
+NUM_NODES = 128
 
 class OneDimKeyValueSetv2(OneDimKeyValueSet):
     def get_next_pair(self, tran: EFAProgram.Transition, cont_evw: str, map_ev_word: str, map_ev_label: str, iterator: list, regs: list, reach_end_label: str) -> EFAProgram.Transition:
@@ -64,8 +64,10 @@ UDKVMSR program configuration. The following parameters are required:
 TASK_NAME       = "splitPageRankMS"
 METADATA_OFFSET = UDKVMSR_0_OFFSET
 DEBUG_FLAG      = False
-MAX_MAP_THREAD_PER_LANE     = 24
-MAX_REDUCE_THREAD_PER_LANE  = 220
+# MAX_MAP_THREAD_PER_LANE     = 24
+# MAX_REDUCE_THREAD_PER_LANE  = 220
+MAX_MAP_THREAD_PER_LANE     = 60
+MAX_REDUCE_THREAD_PER_LANE  = 180
 
 # The usage of kv_combine is optional. If not enabled, set ENABLE_COMBINE to False.
 ENABLE_COMBINE      = True

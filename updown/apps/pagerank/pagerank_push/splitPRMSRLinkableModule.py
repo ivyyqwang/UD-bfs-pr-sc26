@@ -20,9 +20,7 @@ class UDKeyValueMapShuffleReduceTemplatev2(UDKeyValueMapShuffleReduceTemplate):
         #     tran.writeAction(f"print 'combine function: key = %ld, in_vals[0] ({in_values[0]}) = %ld,  in_vals[1] ({in_values[1]}) = %ld) = %ld' {key} {in_values[0]} {in_values[1]} ")
         #     tran.writeAction(f"print 'combine function: key = %ld, old_vals[0] ({old_values[0]}) = %ld,  old_vals[1] ({old_values[1]}) = %ld) = %ld' {key} {old_values[0]} {old_values[1]}")
         # user defined combine function
-        if(key == 57):
-            tran.writeAction(f"print 'combine function: key = %ld, in_vals[0] ({in_values[0]}) = %ld,  old_vals[0] ({old_vals[0]}) = %ld) = %ld' {key} {in_values[0]} {old_vals[0]} ")
-
+        
         for in_val, old_val, result in zip(in_values, old_values, results):
             if DEBUG_FLAG:
                 tran.writeAction(f"print 'combine function: key = %ld {in_val} = %lf,  {old_val} = %lf' {key} {in_val} {old_val}")

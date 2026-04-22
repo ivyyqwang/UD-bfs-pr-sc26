@@ -9,10 +9,10 @@ set(UPDOWNSIMRT_APPS_SRC
     # add py src files here
     tc/udweave/tc_udweave.cpp
     KTruss/udweave/k_truss_udweave.cpp
-    push_bfs/udweave/bfs_udweave.cpp
-    push_pr/udweave/pr_udweave.cpp
-    pagerank/snap_no_split.cpp
-    pagerank/pagerank_push/pagerankMSRsplit.cpp
+    bfs/bfs_push/udweave/bfs_udweave.cpp
+    bfs/bfs_push_pull/updown_bfs_push_pull.cpp
+    pagerank/preprocess/preprocess.cpp
+    pagerank/pagerank_push/pr_udweave.cpp
     pagerank/pagerank_data_driven/partialPagerankDataDriven.cpp
     )
 if (UPDOWN_ENABLE_FASTSIM)
@@ -36,7 +36,8 @@ set(UPDOWNSIMRT_PYTHON_APPS_SRC2BIN
     # add py src files here
     tc/udweave/three_clique_mm_exe.py
     KTruss/udweave/k_truss_exe.py
-    push_bfs/udweave/bfs_udweave_exe.py
+    bfs/bfs_push/udweave/bfs_udweave_exe.py
+    bfs/bfs_push_pull/out/push_pull_exe.py
     pagerank/pagerank_push/out/pr_exe.py
     pagerank/pagerank_data_driven/out/pagerank_pull_dd.py
 )
