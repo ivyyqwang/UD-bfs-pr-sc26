@@ -17,7 +17,7 @@ python3 RMAT_agile.py 12
 
 ### Generate input binary graph (CSR)
 
-It will preprocess graph.txt downloaded from SNAP, generate `<output_filename>` txt file, `<output_filename>_gv.bin` and `<output_filename>_nl.bin` as UpDown program input.
+It will preprocess graph.txt downloaded from SNAP, generate `<output_filename>` adjacency file as UpDown program input.
 
 ```bash
 cd preprocess/

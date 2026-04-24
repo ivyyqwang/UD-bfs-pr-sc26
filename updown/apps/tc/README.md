@@ -22,14 +22,14 @@ It will preprocess graph.txt downloaded from SNAP, generate `<output_filename>` 
 ```bash
 cd preprocess/
 make
-./MtxReorder <input_filename> <output_filename> <num_vertex>
+./preprocess <input_filename> <output_filename> <num_vertex>
 ```
 
 eg: 
 ```
 cd preprocess/
 make
-./MtxReorder RMAT_scale_12_seed_1_edges.txt RMAT_s12_tc.txt 4096
+./preprocess RMAT_scale_12_seed_1_edges.txt RMAT_s12_tc.txt 4096
 ```
 
 

@@ -1,7 +1,7 @@
-all:  MtxReorderOrientation
+all:  preprocess
 
- MtxReorderOrientation: MtxReorderOrientation.cpp
-	g++ -o  MtxReorderOrientation  MtxReorderOrientation.cpp
+ preprocess: preprocess.cpp
+	g++ -o  preprocess  preprocess.cpp
 
 clean:
-	rm  MtxReorderOrientation
+	rm  preprocess

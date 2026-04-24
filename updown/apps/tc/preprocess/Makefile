@@ -1,7 +1,7 @@
-all: MtxReorder
+all: preprocess
 
-MtxReorder: MtxReorder.cpp
-	g++ -o MtxReorder MtxReorder.cpp
+preprocess: preprocess.cpp
+	g++ -o preprocess preprocess.cpp
 
 clean:
-	rm MtxReorder
+	rm preprocess
