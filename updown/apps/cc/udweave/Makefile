@@ -146,9 +146,9 @@ all: $(EXEC) $(EXEC).py
 clean:
 	rm -f $(EXEC)
 	rm -f $(EXEC).o
-	rm -f $(EXEC).py
-	rm -f $(EXEC)EFA.hpp
-	rm -f $(EXEC)EFA.py
+# 	rm -f $(EXEC).py
+# 	rm -f $(EXEC)EFA.hpp
+# 	rm -f $(EXEC)EFA.py
 	rm -f $(EXEC)EFA.bin
 	rm -f $(EXEC).assembly
 	rm -Rf __pycache__

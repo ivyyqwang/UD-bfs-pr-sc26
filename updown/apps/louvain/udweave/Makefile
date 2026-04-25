@@ -199,9 +199,9 @@ preprocess: preprocess.cpp
 clean:
 	rm -f $(EXEC)
 	rm -f $(EXEC).o
-	rm -f *.py
-	rm -f *_exe.hpp
-	rm -f *_exe.py
+# 	rm -f *.py
+# 	rm -f *_exe.hpp
+# 	rm -f *_exe.py
 	rm -f *_exe.bin
 	rm -f *.assembly
 	rm -Rf __pycache__

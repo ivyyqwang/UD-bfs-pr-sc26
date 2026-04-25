@@ -11,9 +11,13 @@ set(UPDOWNSIMRT_APPS_SRC
     KTruss/udweave/k_truss_udweave.cpp
     bfs/bfs_push/udweave/bfs_udweave.cpp
     bfs/bfs_push_pull/updown_bfs_push_pull.cpp
-    pagerank/preprocess/preprocess.cpp
+    bfs/bfs_load_balance/udweave/LBBFS.cpp
     pagerank/pagerank_push/pr_udweave.cpp
     pagerank/pagerank_data_driven/partialPagerankDataDriven.cpp
+    cc/udweave/em.cpp
+    kcore/udweave/kcore.cpp
+    louvain/udweave/louvain.cpp
+    scc/udweave/scc.cpp
     )
 if (UPDOWN_ENABLE_FASTSIM)
     list(APPEND UPDOWNSIMRT_APPS_SRC 
@@ -27,6 +31,7 @@ include_directories(
     common/snap-core
     common/snap-exp
     ../libraries/dramalloc
+    ../libraries/LMStaticMaps
 )
 
 set(UPDOWNSIMRT_PYTHON_APPS_SRC
@@ -38,8 +43,13 @@ set(UPDOWNSIMRT_PYTHON_APPS_SRC2BIN
     KTruss/udweave/k_truss_exe.py
     bfs/bfs_push/udweave/bfs_udweave_exe.py
     bfs/bfs_push_pull/out/push_pull_exe.py
+    bfs/bfs_load_balance/udweave/LBBFSEFA.py
     pagerank/pagerank_push/out/pr_exe.py
     pagerank/pagerank_data_driven/out/pagerank_pull_dd.py
+    cc/udweave/emEFA.py
+    kcore/udweave/kcore_exe.py
+    louvain/udweave/louvain_exe.py
+    scc/udweave/scc_exe.py
 )
 
 

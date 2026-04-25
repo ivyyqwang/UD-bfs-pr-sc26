@@ -124,9 +124,9 @@ convert_el_adj:  convert_el_adj.cpp
 clean:
 	rm -f $(EXEC)
 	rm -f $(EXEC).o
-	rm -f $(EXEC).py
-	rm -f $(EXEC)EFA.hpp
-	rm -f $(EXEC)EFA.py
+# 	rm -f $(EXEC).py
+# 	rm -f $(EXEC)EFA.hpp
+# 	rm -f $(EXEC)EFA.py
 	rm -f $(EXEC)EFA.bin
 	rm -Rf __pycache__
 	rm -f convert_el_adj
