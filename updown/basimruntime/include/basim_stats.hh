@@ -2,6 +2,9 @@
 #define BASIM_STATS_HH
 #include <updown_config.h>
 #include <atomic>
+#include <memory> 
+#include <vector>
+
 struct BASimStats {
   uint64_t cycle_count;
   uint64_t inst_count; 

@@ -1,5 +1,5 @@
 
-#include "utils.hpp"
+// #include "utils.hpp"s
 #include "out/push_pull_exe.hpp"
 #include <basim_stats.hh>
 #include <basimupdown.h>
@@ -61,6 +61,24 @@ struct Iterator {
   Vertex *begin;
   Vertex *end;
 };
+
+/* Cpoy between local and global, only work on Fastsim2 */
+size_t CopyLocal2Global(dramalloc::DramAllocator* allocator, uint64_t chunck_size, uint64_t local_addr, uint64_t global_addr, uint64_t copy_size){
+    uint64_t current_copy_size = 0;
+    uint64_t current_global_addr = global_addr;
+    uint64_t current_local_addr = local_addr;
+    while(current_copy_size < copy_size){
+      uint64_t size = chunck_size;
+      if((copy_size - current_copy_size) < size)
+        size = copy_size - current_copy_size;
+      void *current_global_addr_sa = allocator->translate_udva2sa(current_global_addr);
+      memcpy(current_global_addr_sa, reinterpret_cast<void *>(current_local_addr), size);
+      current_copy_size = current_copy_size + size;
+      current_global_addr = current_global_addr + size;
+      current_local_addr = current_local_addr + size;
+    }
+    return current_copy_size;
+}
 
 void init_scratchpad(UpDown::UDRuntime_t *rt, Vertex *g_v, Vertex *orig_g_v_bin, uint64_t *front_base, uint64_t num_vertices, uint64_t num_uds,
                      uint64_t front_stride, Iterator *partitions, uint64_t partitions_per_lane) {
