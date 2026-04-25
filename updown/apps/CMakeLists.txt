@@ -45,7 +45,7 @@ set(UPDOWNSIMRT_PYTHON_APPS_SRC2BIN
     bfs/bfs_push_pull/out/push_pull_exe.py
     bfs/bfs_load_balance/udweave/LBBFSEFA.py
     pagerank/pagerank_push/out/pr_exe.py
-    pagerank/pagerank_data_driven/out/pagerank_pull_dd.py
+    pagerank/pagerank_data_driven/out/pagerank_pull_split_dd.py
     cc/udweave/emEFA.py
     kcore/udweave/kcore_exe.py
     louvain/udweave/louvain_exe.py
